@@ -4,10 +4,21 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-DISPLAY_CHANNEL_ID = int(os.getenv("DISPLAY_CHANNEL_ID"))
-COMMAND_CHANNEL_ID = int(os.getenv("COMMAND_CHANNEL_ID"))
+display_channel_raw = os.getenv("DISPLAY_CHANNEL_ID")
+command_channel_raw = os.getenv("COMMAND_CHANNEL_ID")
+
+if not TOKEN:
+    raise ValueError("Missing DISCORD_TOKEN environment variable")
+if not display_channel_raw:
+    raise ValueError("Missing DISPLAY_CHANNEL_ID environment variable")
+if not command_channel_raw:
+    raise ValueError("Missing COMMAND_CHANNEL_ID environment variable")
+
+DISPLAY_CHANNEL_ID = int(display_channel_raw)
+COMMAND_CHANNEL_ID = int(command_channel_raw)
 
 DATA_FILE = "boss_timers.json"
 MESSAGE_ID_FILE = "display_message.json"
@@ -260,7 +271,6 @@ BOSSES = {
 
 GROUP_ORDER = ["ENDGAME", "MIDRAID", "EDL", "DL", "FROZEN", "METEORIC", "WARDEN"]
 
-# stores kill timestamp ISO by boss key
 boss_timers = {}
 display_message_id = None
 
@@ -305,8 +315,33 @@ def find_boss_key(user_input: str):
     return None
 
 
-def set_boss_timer(boss_key: str):
+def set_boss_timer_now(boss_key: str):
     kill_time = now_utc()
+    boss_timers[boss_key] = kill_time.isoformat()
+    save_timers()
+    return kill_time
+
+
+def set_boss_timer_from_open_close(boss_key: str, open_minutes: int, close_minutes: int):
+    """
+    open_minutes = minutes until open from now
+    close_minutes = minutes until close from now
+    We store kill_time, so we back-calculate from the open time.
+    """
+    boss = BOSSES[boss_key]
+    open_time = now_utc() + timedelta(minutes=open_minutes)
+    close_time = now_utc() + timedelta(minutes=close_minutes)
+
+    expected_window = boss["window_minutes"]
+    actual_window = int((close_time - open_time).total_seconds() // 60)
+
+    if actual_window != expected_window:
+        raise ValueError(
+            f"{boss['display']} requires a {expected_window} minute window, "
+            f"but open/close values give {actual_window} minutes."
+        )
+
+    kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
     boss_timers[boss_key] = kill_time.isoformat()
     save_timers()
     return kill_time
@@ -331,6 +366,48 @@ def format_remaining(target: datetime):
     return f"{minutes}m"
 
 
+def parse_duration_to_minutes(text: str) -> int:
+    """
+    Accepts:
+    90
+    90m
+    2h
+    2h30m
+    1d2h15m
+    """
+    cleaned = text.lower().replace(" ", "")
+    if cleaned.isdigit():
+        return int(cleaned)
+
+    total = 0
+    number = ""
+
+    for ch in cleaned:
+        if ch.isdigit():
+            number += ch
+            continue
+
+        if not number:
+            raise ValueError(f"Invalid duration: {text}")
+
+        value = int(number)
+        number = ""
+
+        if ch == "d":
+            total += value * 1440
+        elif ch == "h":
+            total += value * 60
+        elif ch == "m":
+            total += value
+        else:
+            raise ValueError(f"Invalid duration: {text}")
+
+    if number:
+        total += int(number)
+
+    return total
+
+
 def build_board_text():
     lines = ["**Boss Windows**", ""]
 
@@ -352,6 +429,28 @@ def build_board_text():
     for group in GROUP_ORDER:
         lines.append(f"__{group}__")
         lines.extend(grouped[group])
+        lines.append("")
+
+    lines.append(f"Updated: {now_utc().strftime('%H:%M UTC')}")
+    return "\n".join(lines)
+
+
+def build_info_text():
+    lines = ["Boss Timers", ""]
+
+    for group in GROUP_ORDER:
+        lines.append(group)
+        for key, boss in BOSSES.items():
+            if boss["group"] != group:
+                continue
+
+            if key in boss_timers:
+                open_time, close_time = get_open_close_times(key)
+                lines.append(
+                    f"- {boss['display']}: open {format_remaining(open_time)} | close {format_remaining(close_time)}"
+                )
+            else:
+                lines.append(f"- {boss['display']}: open - | close -")
         lines.append("")
 
     lines.append(f"Updated: {now_utc().strftime('%H:%M UTC')}")
@@ -383,6 +482,7 @@ async def update_display_board():
 @bot.event
 async def on_ready():
     load_data()
+    await bot.tree.sync()
     await update_display_board()
     print(f"Logged in as {bot.user}")
 
@@ -401,12 +501,71 @@ async def on_message(message: discord.Message):
     if not boss_key:
         return
 
-    set_boss_timer(boss_key)
+    set_boss_timer_now(boss_key)
     open_time, close_time = get_open_close_times(boss_key)
     await message.channel.send(
         f"{BOSSES[boss_key]['display']} open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
     )
     await update_display_board()
+
+
+@bot.tree.command(name="wipe", description="Reset all boss timers")
+async def wipe(interaction: discord.Interaction):
+    global boss_timers
+    boss_timers = {}
+    save_timers()
+    await update_display_board()
+    await interaction.response.send_message("All boss timers have been reset.")
+
+
+@bot.tree.command(name="set", description="Manually set a boss using open and close times from now")
+@app_commands.describe(
+    boss="Boss name or alias",
+    open="Time until open, like 2h, 90m, or 1d2h",
+    close="Time until close, like 2h15m or 95m"
+)
+async def set_timer(interaction: discord.Interaction, boss: str, open: str, close: str):
+    boss_key = find_boss_key(boss)
+    if not boss_key:
+        await interaction.response.send_message("Boss not found.", ephemeral=True)
+        return
+
+    try:
+        open_minutes = parse_duration_to_minutes(open)
+        close_minutes = parse_duration_to_minutes(close)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        return
+
+    if close_minutes < open_minutes:
+        await interaction.response.send_message("Close time cannot be earlier than open time.", ephemeral=True)
+        return
+
+    try:
+        set_boss_timer_from_open_close(boss_key, open_minutes, close_minutes)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        return
+
+    open_time, close_time = get_open_close_times(boss_key)
+    await update_display_board()
+    await interaction.response.send_message(
+        f"{BOSSES[boss_key]['display']} set: open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
+    )
+
+
+@bot.tree.command(name="info", description="DM yourself the current boss timers")
+async def info(interaction: discord.Interaction):
+    info_text = build_info_text()
+
+    try:
+        await interaction.user.send(f"```{info_text}```")
+        await interaction.response.send_message("Sent you a DM with all boss timers.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "I couldn't DM you. Your DMs may be closed.",
+            ephemeral=True
+        )
 
 
 bot.run(TOKEN)
