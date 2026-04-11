@@ -1,16 +1,15 @@
-from discord.ext import tasks
-
 import os
 import json
 from datetime import datetime, timedelta, timezone
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 display_channel_raw = os.getenv("DISPLAY_CHANNEL_ID")
 command_channel_raw = os.getenv("COMMAND_CHANNEL_ID")
+guild_id_raw = os.getenv("GUILD_ID")
 
 if not TOKEN:
     raise ValueError("Missing DISCORD_TOKEN environment variable")
@@ -18,9 +17,12 @@ if not display_channel_raw:
     raise ValueError("Missing DISPLAY_CHANNEL_ID environment variable")
 if not command_channel_raw:
     raise ValueError("Missing COMMAND_CHANNEL_ID environment variable")
+if not guild_id_raw:
+    raise ValueError("Missing GUILD_ID environment variable")
 
 DISPLAY_CHANNEL_ID = int(display_channel_raw)
 COMMAND_CHANNEL_ID = int(command_channel_raw)
+GUILD_ID = int(guild_id_raw)
 
 DATA_FILE = "boss_timers.json"
 MESSAGE_ID_FILE = "display_message.json"
@@ -325,11 +327,6 @@ def set_boss_timer_now(boss_key: str):
 
 
 def set_boss_timer_from_open_close(boss_key: str, open_minutes: int, close_minutes: int):
-    """
-    open_minutes = minutes until open from now
-    close_minutes = minutes until close from now
-    We store kill_time, so we back-calculate from the open time.
-    """
     boss = BOSSES[boss_key]
     open_time = now_utc() + timedelta(minutes=open_minutes)
     close_time = now_utc() + timedelta(minutes=close_minutes)
@@ -369,14 +366,6 @@ def format_remaining(target: datetime):
 
 
 def parse_duration_to_minutes(text: str) -> int:
-    """
-    Accepts:
-    90
-    90m
-    2h
-    2h30m
-    1d2h15m
-    """
     cleaned = text.lower().replace(" ", "")
     if cleaned.isdigit():
         return int(cleaned)
@@ -412,7 +401,6 @@ def parse_duration_to_minutes(text: str) -> int:
 
 def build_board_text():
     lines = ["**Boss Windows**", ""]
-
     grouped = {group: [] for group in GROUP_ORDER}
 
     for key, boss in BOSSES.items():
@@ -480,14 +468,28 @@ async def update_display_board():
     display_message_id = msg.id
     save_display_message_id()
 
-@tasks.loop(seconds=60)  # refresh every 60 seconds
+
+@tasks.loop(seconds=60)
 async def auto_refresh_board():
     await update_display_board()
-    
+
+
+@auto_refresh_board.before_loop
+async def before_auto_refresh_board():
+    await bot.wait_until_ready()
+
+
+async def setup_hook():
+    guild = discord.Object(id=GUILD_ID)
+    await bot.tree.sync(guild=guild)
+
+
+bot.setup_hook = setup_hook
+
+
 @bot.event
 async def on_ready():
     load_data()
-    await bot.tree.sync()
     await update_display_board()
 
     if not auto_refresh_board.is_running():
@@ -501,6 +503,9 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    if message.guild is None:
+        return
+
     if message.channel.id != COMMAND_CHANNEL_ID:
         return
 
@@ -512,28 +517,60 @@ async def on_message(message: discord.Message):
 
     set_boss_timer_now(boss_key)
     open_time, close_time = get_open_close_times(boss_key)
+
     await message.channel.send(
         f"{BOSSES[boss_key]['display']} open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
     )
     await update_display_board()
 
 
-@bot.tree.command(name="wipe", description="Reset all boss timers")
+def in_command_channel(interaction: discord.Interaction) -> bool:
+    return interaction.channel_id == COMMAND_CHANNEL_ID
+
+
+@bot.tree.command(
+    name="wipe",
+    description="Reset all boss timers",
+    guild=discord.Object(id=GUILD_ID),
+)
 async def wipe(interaction: discord.Interaction):
     global boss_timers
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
     boss_timers = {}
     save_timers()
     await update_display_board()
-    await interaction.response.send_message("All boss timers have been reset.")
+
+    await interaction.response.send_message(
+        "All boss timers have been reset.",
+        ephemeral=True,
+    )
 
 
-@bot.tree.command(name="set", description="Manually set a boss using open and close times from now")
+@bot.tree.command(
+    name="set",
+    description="Manually set a boss using open and close times from now",
+    guild=discord.Object(id=GUILD_ID),
+)
 @app_commands.describe(
     boss="Boss name or alias",
     open="Time until open, like 2h, 90m, or 1d2h",
-    close="Time until close, like 2h15m or 95m"
+    close="Time until close, like 2h15m or 95m",
 )
 async def set_timer(interaction: discord.Interaction, boss: str, open: str, close: str):
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
     boss_key = find_boss_key(boss)
     if not boss_key:
         await interaction.response.send_message("Boss not found.", ephemeral=True)
@@ -547,7 +584,10 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str, clos
         return
 
     if close_minutes < open_minutes:
-        await interaction.response.send_message("Close time cannot be earlier than open time.", ephemeral=True)
+        await interaction.response.send_message(
+            "Close time cannot be earlier than open time.",
+            ephemeral=True,
+        )
         return
 
     try:
@@ -558,22 +598,38 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str, clos
 
     open_time, close_time = get_open_close_times(boss_key)
     await update_display_board()
+
     await interaction.response.send_message(
-        f"{BOSSES[boss_key]['display']} set: open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
+        f"{BOSSES[boss_key]['display']} set: open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}",
+        ephemeral=True,
     )
 
 
-@bot.tree.command(name="info", description="DM yourself the current boss timers")
+@bot.tree.command(
+    name="info",
+    description="DM yourself the current boss timers",
+    guild=discord.Object(id=GUILD_ID),
+)
 async def info(interaction: discord.Interaction):
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
     info_text = build_info_text()
 
     try:
         await interaction.user.send(f"```{info_text}```")
-        await interaction.response.send_message("Sent you a DM with all boss timers.", ephemeral=True)
+        await interaction.response.send_message(
+            "Sent you a DM with all boss timers.",
+            ephemeral=True,
+        )
     except discord.Forbidden:
         await interaction.response.send_message(
             "I couldn't DM you. Your DMs may be closed.",
-            ephemeral=True
+            ephemeral=True,
         )
 
 
