@@ -1,3 +1,5 @@
+from discord.ext import tasks
+
 import os
 import json
 from datetime import datetime, timedelta, timezone
@@ -478,12 +480,19 @@ async def update_display_board():
     display_message_id = msg.id
     save_display_message_id()
 
-
+@tasks.loop(seconds=60)  # refresh every 60 seconds
+async def auto_refresh_board():
+    await update_display_board()
+    
 @bot.event
 async def on_ready():
     load_data()
     await bot.tree.sync()
     await update_display_board()
+
+    if not auto_refresh_board.is_running():
+        auto_refresh_board.start()
+
     print(f"Logged in as {bot.user}")
 
 
