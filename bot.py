@@ -539,20 +539,19 @@ async def check_due_boss_pings():
             continue
 
         open_time, _ = get_open_close_times(boss_key)
+        time_diff = (now_utc() - open_time).total_seconds()
 
-       time_diff = (now_utc() - open_time).total_seconds()
+        if 0 <= time_diff <= 120 and boss_key not in pinged_bosses:
+            role_id = get_ping_role_id(boss_key)
+            boss_name = BOSSES[boss_key]["display"]
 
-if 0 <= time_diff <= 120 and boss_key not in pinged_bosses:
-    role_id = get_ping_role_id(boss_key)
-    boss_name = BOSSES[boss_key]["display"]
+            message = f"{boss_name} is due now."
 
-    message = f"{boss_name} is due now."
+            if role_id:
+                message = f"<@&{role_id}> 🚨 {boss_name} is due NOW 🚨"
 
-    if role_id:
-        message = f"<@&{role_id}> 🚨 {boss_name} is due NOW 🚨"
-
-    await channel.send(message)
-    pinged_bosses.add(boss_key)
+            await channel.send(message)
+            pinged_bosses.add(boss_key)
 
 
 @tasks.loop(minutes=1)
