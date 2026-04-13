@@ -598,6 +598,49 @@ async def wipe(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+@bot.tree.command(
+    name="reset",
+    description="Reset one boss timer",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    boss="Boss name or alias",
+)
+async def reset_boss(interaction: discord.Interaction, boss: str):
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    boss_key = find_boss_key(boss)
+    if not boss_key:
+        await interaction.response.send_message(
+            "Boss not found.",
+            ephemeral=True,
+        )
+        return
+
+    if boss_key not in boss_timers:
+        await interaction.response.send_message(
+            f"{BOSSES[boss_key]['display']} does not currently have an active timer.",
+            ephemeral=True,
+        )
+        return
+
+    del boss_timers[boss_key]
+    save_timers()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after reset failed: {e}")
+
+    await interaction.response.send_message(
+        f"{BOSSES[boss_key]['display']} timer has been reset.",
+        ephemeral=True,
+    )
 
 @bot.tree.command(
     name="set",
