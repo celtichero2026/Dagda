@@ -466,9 +466,11 @@ def build_board_text():
             open_str = "-"
             close_str = "-"
 
-        grouped[boss["group"]].append(
-            f"**{boss['display']}** open `{open_str}` | close `{close_str}`"
-        )
+        indicator = "🟢 " if is_in_window(key) else ""
+
+grouped[boss["group"]].append(
+    f"{indicator}**{boss['display']}** open `{open_str}` | close `{close_str}`"
+)
 
     for group in GROUP_ORDER:
         if not grouped[group]:
@@ -625,6 +627,14 @@ async def on_message(message: discord.Message):
 
 def in_command_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id == COMMAND_CHANNEL_ID
+
+def is_in_window(boss_key: str) -> bool:
+    if boss_key not in boss_timers:
+        return False
+
+    open_time, close_time = get_open_close_times(boss_key)
+    current = now_utc()
+    return open_time <= current <= close_time
 
 
 @bot.tree.command(
