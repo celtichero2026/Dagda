@@ -403,11 +403,29 @@ def parse_duration_to_minutes(text: str) -> int:
 
 
 def build_board_text():
-    lines = ["**Boss Windows**", ""]
+    ALWAYS_SHOW = {
+        "croms manikin",
+        "dhiothu",
+        "bloodthorn",
+        "gelebron",
+        "proteus",
+        "necromancer",
+        "mordris",
+        "hrungnir",
+        "aggragoth",
+    }
+
+    lines = []
     grouped = {group: [] for group in GROUP_ORDER}
 
     for key, boss in BOSSES.items():
-        if key in boss_timers:
+        has_timer = key in boss_timers
+        should_show = key in ALWAYS_SHOW or has_timer
+
+        if not should_show:
+            continue
+
+        if has_timer:
             open_time, close_time = get_open_close_times(key)
             open_str = format_remaining(open_time)
             close_str = format_remaining(close_time)
@@ -420,6 +438,9 @@ def build_board_text():
         )
 
     for group in GROUP_ORDER:
+        if not grouped[group]:
+            continue
+
         lines.append(f"__{group}__")
         lines.extend(grouped[group])
         lines.append("")
