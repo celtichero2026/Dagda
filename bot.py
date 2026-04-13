@@ -23,6 +23,7 @@ if not guild_id_raw:
 DISPLAY_CHANNEL_ID = int(display_channel_raw)
 COMMAND_CHANNEL_ID = int(command_channel_raw)
 GUILD_ID = int(guild_id_raw)
+pinged_bosses = set()
 
 DATA_FILE = "boss_timers.json"
 MESSAGE_ID_FILE = "display_message.json"
@@ -31,6 +32,47 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+role_endgame_raw = os.getenv("ROLE_ENDGAME_ID")
+role_midraid_raw = os.getenv("ROLE_MIDRAID_ID")
+role_215_raw = os.getenv("ROLE_215_ID")
+role_edl_raw = os.getenv("ROLE_EDL_ID")
+role_dl_raw = os.getenv("ROLE_DL_ID")
+role_frozen_raw = os.getenv("ROLE_FROZEN_ID")
+role_meteoric_raw = os.getenv("ROLE_METEORIC_ID")
+role_warden_raw = os.getenv("ROLE_WARDEN_ID")
+
+ROLE_ENDGAME_ID = int(role_endgame_raw) if role_endgame_raw else None
+ROLE_MIDRAID_ID = int(role_midraid_raw) if role_midraid_raw else None
+ROLE_215_ID = int(role_215_raw) if role_215_raw else None
+ROLE_EDL_ID = int(role_edl_raw) if role_edl_raw else None
+ROLE_DL_ID = int(role_dl_raw) if role_dl_raw else None
+ROLE_FROZEN_ID = int(role_frozen_raw) if role_frozen_raw else None
+ROLE_METEORIC_ID = int(role_meteoric_raw) if role_meteoric_raw else None
+ROLE_WARDEN_ID = int(role_warden_raw) if role_warden_raw else None
+
+def get_ping_role_id(boss_key: str):
+    boss = BOSSES[boss_key]
+    group = boss["group"]
+
+    if boss_key == "215":
+        return ROLE_215_ID
+    if group == "ENDGAME":
+        return ROLE_ENDGAME_ID
+    if group == "MIDRAID":
+        return ROLE_MIDRAID_ID
+    if group == "EDL":
+        return ROLE_EDL_ID
+    if group == "DL":
+        return ROLE_DL_ID
+    if group == "FROZEN":
+        return ROLE_FROZEN_ID
+    if group == "METEORIC":
+        return ROLE_METEORIC_ID
+    if group == "WARDEN":
+        return ROLE_WARDEN_ID
+
+    return None
 
 BOSSES = {
     "croms manikin": {
@@ -251,11 +293,11 @@ BOSSES = {
         "aliases": ["goretusk"],
     },
     "bonehead": {
-        "display": "Bonehad",
+        "display": "Bonehead",
         "group": "METEORIC",
         "respawn_minutes": 15,
         "window_minutes": 5,
-        "aliases": ["bonehad", "bonehead"],
+        "aliases": ["bonehead", "bonehead"],
     },
     "doomclaw": {
         "display": "Doomclaw",
@@ -325,6 +367,7 @@ def find_boss_key(user_input: str):
 def set_boss_timer_now(boss_key: str):
     kill_time = now_utc()
     boss_timers[boss_key] = kill_time.isoformat()
+    pinged_bosses.discard(boss_key)
     save_timers()
     return kill_time
 
@@ -334,6 +377,7 @@ def set_boss_timer_from_open(boss_key: str, open_minutes: int):
     open_time = now_utc() + timedelta(minutes=open_minutes)
     kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
     boss_timers[boss_key] = kill_time.isoformat()
+    pinged_bosses.discard(boss_key)
     save_timers()
     return kill_time
 
@@ -485,11 +529,37 @@ async def update_display_board():
     save_display_message_id()
     print(f"Created new display message: {display_message_id}")
 
+async def check_due_boss_pings():
+    channel = bot.get_channel(COMMAND_CHANNEL_ID)
+    if channel is None:
+        channel = await bot.fetch_channel(COMMAND_CHANNEL_ID)
+
+    for boss_key in list(boss_timers.keys()):
+        if boss_key not in BOSSES:
+            continue
+
+        open_time, _ = get_open_close_times(boss_key)
+
+       time_diff = (now_utc() - open_time).total_seconds()
+
+if 0 <= time_diff <= 120 and boss_key not in pinged_bosses:
+    role_id = get_ping_role_id(boss_key)
+    boss_name = BOSSES[boss_key]["display"]
+
+    message = f"{boss_name} is due now."
+
+    if role_id:
+        message = f"<@&{role_id}> 🚨 {boss_name} is due NOW 🚨"
+
+    await channel.send(message)
+    pinged_bosses.add(boss_key)
+
 
 @tasks.loop(minutes=1)
 async def auto_refresh_board():
     try:
         await update_display_board()
+        await check_due_boss_pings()
         print("Board refreshed")
     except Exception as e:
         print(f"Auto refresh error: {e}")
@@ -565,7 +635,7 @@ def in_command_channel(interaction: discord.Interaction) -> bool:
     guild=discord.Object(id=GUILD_ID),
 )
 async def wipe(interaction: discord.Interaction):
-    global boss_timers
+    global boss_timers, pinged_bosses
 
     if not in_command_channel(interaction):
         await interaction.response.send_message(
@@ -575,6 +645,7 @@ async def wipe(interaction: discord.Interaction):
         return
 
     boss_timers = {}
+    pinged_bosses = set()
     save_timers()
 
     try:
@@ -619,6 +690,7 @@ async def reset_boss(interaction: discord.Interaction, boss: str):
         return
 
     del boss_timers[boss_key]
+    pinged_bosses.discard(boss_key)
     save_timers()
 
     try:
@@ -707,6 +779,7 @@ async def info(interaction: discord.Interaction):
             "I couldn't DM you. Your DMs may be closed.",
             ephemeral=True,
         )
+
 
 
 bot.run(TOKEN)
