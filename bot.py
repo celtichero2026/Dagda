@@ -739,21 +739,34 @@ async def wipe(interaction: discord.Interaction):
         )
         return
 
+    user = interaction.user
+
+    # Reset data
     boss_timers = {}
     pinged_bosses = set()
     save_timers()
     await clear_all_alert_messages()
 
+    # Update board
     try:
         await update_display_board()
     except Exception as e:
         print(f"Board update after wipe failed: {e}")
 
+    # PRIVATE confirmation
     await interaction.response.send_message(
         "All boss timers have been reset.",
         ephemeral=True,
     )
 
+    # PUBLIC log message
+    channel = bot.get_channel(COMMAND_CHANNEL_ID)
+    if channel is None:
+        channel = await bot.fetch_channel(COMMAND_CHANNEL_ID)
+
+    await channel.send(
+        f"⚠️ **Boss timers wiped by {user.mention}**"
+    )
 
 @bot.tree.command(
     name="reset",
