@@ -329,20 +329,9 @@ def set_boss_timer_now(boss_key: str):
     return kill_time
 
 
-def set_boss_timer_from_open_close(boss_key: str, open_minutes: int, close_minutes: int):
+def set_boss_timer_from_open(boss_key: str, open_minutes: int):
     boss = BOSSES[boss_key]
     open_time = now_utc() + timedelta(minutes=open_minutes)
-    close_time = now_utc() + timedelta(minutes=close_minutes)
-
-    expected_window = boss["window_minutes"]
-    actual_window = int((close_time - open_time).total_seconds() // 60)
-
-    if actual_window != expected_window:
-        raise ValueError(
-            f"{boss['display']} requires a {expected_window} minute window, "
-            f"but open/close values give {actual_window} minutes."
-        )
-
     kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
     boss_timers[boss_key] = kill_time.isoformat()
     save_timers()
@@ -680,7 +669,7 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str, clos
         return
 
     try:
-        set_boss_timer_from_open_close(boss_key, open_minutes, close_minutes)
+        set_boss_timer_from_open(boss_key, open_minutes)
     except ValueError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
         return
