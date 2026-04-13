@@ -468,9 +468,9 @@ def build_board_text():
 
         indicator = "🟢 " if is_in_window(key) else ""
 
-grouped[boss["group"]].append(
-    f"{indicator}**{boss['display']}** open `{open_str}` | close `{close_str}`"
-)
+        grouped[boss["group"]].append(
+            f"{indicator}**{boss['display']}** open `{open_str}` | close `{close_str}`"
+        )
 
     for group in GROUP_ORDER:
         if not grouped[group]:
