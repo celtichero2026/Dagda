@@ -493,7 +493,8 @@ def build_board_text():
         "aggragoth",
     }
 
-    lines = []
+    lines = ["⏳ **Active Boss Times** ⏳", ""]
+
     grouped = {group: [] for group in GROUP_ORDER}
 
     for key, boss in BOSSES.items():
@@ -505,29 +506,40 @@ def build_board_text():
 
         if has_timer:
             open_time, close_time = get_open_close_times(key)
-            open_str = format_remaining(open_time)
-            close_str = format_remaining(close_time)
-        else:
-            open_str = "-"
-            close_str = "-"
+            open_seconds = (open_time - now_utc()).total_seconds()
+            close_seconds = (close_time - now_utc()).total_seconds()
 
-        indicator = "🟢 " if is_in_window(key) else ""
+            # Status logic
+            if open_seconds > 0:
+                status = f"{format_remaining(open_time)}"
+                prefix = ""
+            elif close_seconds > 0:
+                status = f"🔥 OPEN ({format_remaining(close_time)} left)"
+                prefix = "🟢 "
+            else:
+                status = "❌ EXPIRED"
+                prefix = "🔴 "
+
+        else:
+            status = "-"
+            prefix = ""
 
         grouped[boss["group"]].append(
-            f"{indicator}**{boss['display']}** open `{open_str}` | close `{close_str}`"
+            f"{prefix}**{boss['display']}** • {status}"
         )
 
     for group in GROUP_ORDER:
         if not grouped[group]:
             continue
 
-        lines.append(f"__{group}__")
+        lines.append(f"✦ **{group}**")
+        lines.append("```")
         lines.extend(grouped[group])
-        lines.append("")
+        lines.append("```")
 
-    lines.append(f"Updated: {now_utc().strftime('%H:%M UTC')}")
+    lines.append(f"🕒 {now_utc().strftime('%H:%M UTC')}")
+
     return "\n".join(lines)
-
 
 def build_info_text():
     lines = ["Boss Timers", ""]
