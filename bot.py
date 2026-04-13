@@ -294,6 +294,9 @@ def load_json(path, fallback):
             return json.load(f)
     except FileNotFoundError:
         return fallback
+    except json.JSONDecodeError:
+        print(f"JSON decode error in {path}, using fallback.")
+        return fallback
 
 
 def load_data():
@@ -460,18 +463,26 @@ async def update_display_board():
         try:
             msg = await channel.fetch_message(display_message_id)
             await msg.edit(content=content)
+            print(f"Board edited successfully: {display_message_id}")
             return
         except discord.NotFound:
-            pass
+            print("Stored display message not found. Creating a new one.")
+        except Exception as e:
+            print(f"Edit existing board failed: {e}")
 
     msg = await channel.send(content)
     display_message_id = msg.id
     save_display_message_id()
+    print(f"Created new display message: {display_message_id}")
 
 
-@tasks.loop(seconds=60)
+@tasks.loop(minutes=1)
 async def auto_refresh_board():
-    await update_display_board()
+    try:
+        await update_display_board()
+        print("Board refreshed")
+    except Exception as e:
+        print(f"Auto refresh error: {e}")
 
 
 @auto_refresh_board.before_loop
@@ -490,10 +501,16 @@ bot.setup_hook = setup_hook
 @bot.event
 async def on_ready():
     load_data()
-    await update_display_board()
+
+    try:
+        await update_display_board()
+        print("Initial board update complete")
+    except Exception as e:
+        print(f"Initial board update error: {e}")
 
     if not auto_refresh_board.is_running():
         auto_refresh_board.start()
+        print("Auto refresh started")
 
     print(f"Logged in as {bot.user}")
 
@@ -521,7 +538,11 @@ async def on_message(message: discord.Message):
     await message.channel.send(
         f"{BOSSES[boss_key]['display']} open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
     )
-    await update_display_board()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Immediate update after message failed: {e}")
 
 
 def in_command_channel(interaction: discord.Interaction) -> bool:
@@ -545,7 +566,11 @@ async def wipe(interaction: discord.Interaction):
 
     boss_timers = {}
     save_timers()
-    await update_display_board()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after wipe failed: {e}")
 
     await interaction.response.send_message(
         "All boss timers have been reset.",
@@ -597,7 +622,11 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str, clos
         return
 
     open_time, close_time = get_open_close_times(boss_key)
-    await update_display_board()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after set failed: {e}")
 
     await interaction.response.send_message(
         f"{BOSSES[boss_key]['display']} set: open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}",
