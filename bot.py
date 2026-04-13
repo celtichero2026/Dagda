@@ -530,29 +530,28 @@ async def update_display_board():
     print(f"Created new display message: {display_message_id}")
 
 async def check_due_boss_pings():
-    channel = bot.get_channel(COMMAND_CHANNEL_ID)
+    channel = bot.get_channel(DISPLAY_CHANNEL_ID)
     if channel is None:
-        channel = await bot.fetch_channel(COMMAND_CHANNEL_ID)
+        channel = await bot.fetch_channel(DISPLAY_CHANNEL_ID)
 
     for boss_key in list(boss_timers.keys()):
         if boss_key not in BOSSES:
             continue
 
         open_time, _ = get_open_close_times(boss_key)
-        time_diff = (now_utc() - open_time).total_seconds()
+        seconds_until_open = (open_time - now_utc()).total_seconds()
 
-        if 0 <= time_diff <= 120 and boss_key not in pinged_bosses:
+        if 0 <= seconds_until_open <= 120 and boss_key not in pinged_bosses:
             role_id = get_ping_role_id(boss_key)
             boss_name = BOSSES[boss_key]["display"]
 
-            message = f"{boss_name} is due now."
+            message = f"{boss_name} is due in 1 minute."
 
             if role_id:
-                message = f"<@&{role_id}> 🚨 {boss_name} is due NOW 🚨"
+                message = f"<@&{role_id}> 🚨 {boss_name} is due in 1 minute. 🚨"
 
-            await channel.send(message)
+            await channel.send(message, delete_after=600)
             pinged_bosses.add(boss_key)
-
 
 @tasks.loop(minutes=1)
 async def auto_refresh_board():
