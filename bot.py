@@ -366,9 +366,11 @@ def save_alert_messages():
 
 def find_boss_key(user_input: str):
     cleaned = user_input.lower().strip()
-    sorted_bosses = sorted(     BOSSES.items(),     key=lambda item: (         get_open_close_times(item[0])[0]         if item[0] in boss_timers else datetime.max.replace(tzinfo=timezone.utc)     ) )  for key, boss in sorted_bosses:
+
+    for key, boss in BOSSES.items():
         if cleaned == key or cleaned in boss["aliases"]:
             return key
+
     return None
 
 
@@ -493,22 +495,26 @@ def build_board_embed():
         "aggragoth",
     }
 
+    has_active = any(is_in_window(k) for k in boss_timers)
+    color = discord.Color.red() if has_active else discord.Color.teal()
+
     embed = discord.Embed(
         title="⏳ Active Boss Times ⏳",
-        color=discord.Color.teal()
+        color=color
     )
 
     grouped = {group: [] for group in GROUP_ORDER}
 
     sorted_bosses = sorted(
-    BOSSES.items(),
-    key=lambda item: (
-        get_open_close_times(item[0])[0]
-        if item[0] in boss_timers else datetime.max.replace(tzinfo=timezone.utc)
+        BOSSES.items(),
+        key=lambda item: (
+            get_open_close_times(item[0])[0]
+            if item[0] in boss_timers
+            else datetime.max.replace(tzinfo=timezone.utc)
+        )
     )
-)
 
-for key, boss in sorted_bosses:
+    for key, boss in sorted_bosses:
         has_timer = key in boss_timers
         should_show = key in ALWAYS_SHOW or has_timer
 
@@ -521,10 +527,14 @@ for key, boss in sorted_bosses:
             close_seconds = (close_time - now_utc()).total_seconds()
 
             if open_seconds > 0:
-                status = format_remaining(open_time)
-                prefix = ""
+                if open_seconds <= 300:
+                    status = f"⚠️ {format_remaining(open_time)}"
+                    prefix = "🟡 "
+                else:
+                    status = format_remaining(open_time)
+                    prefix = ""
             elif close_seconds > 0:
-                status = f"OPEN • {format_remaining(close_time)} left"
+                status = f"🔥 OPEN NOW • {format_remaining(close_time)} left"
                 prefix = "🟢 "
             else:
                 status = "EXPIRED"
@@ -534,7 +544,7 @@ for key, boss in sorted_bosses:
             prefix = ""
 
         grouped[boss["group"]].append(
-            f"{prefix}{boss['display']} • {status}"
+            f"{prefix}{boss['display']:<16} • {status}"
         )
 
     for group in GROUP_ORDER:
