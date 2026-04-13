@@ -366,7 +366,7 @@ def save_alert_messages():
 
 def find_boss_key(user_input: str):
     cleaned = user_input.lower().strip()
-    for key, boss in BOSSES.items():
+    sorted_bosses = sorted(     BOSSES.items(),     key=lambda item: (         get_open_close_times(item[0])[0]         if item[0] in boss_timers else datetime.max.replace(tzinfo=timezone.utc)     ) )  for key, boss in sorted_bosses:
         if cleaned == key or cleaned in boss["aliases"]:
             return key
     return None
@@ -480,7 +480,7 @@ def parse_duration_to_minutes(text: str) -> int:
     return total
 
 
-def build_board_text():
+def build_board_embed():
     ALWAYS_SHOW = {
         "croms manikin",
         "dhiothu",
@@ -493,11 +493,22 @@ def build_board_text():
         "aggragoth",
     }
 
-    lines = ["⏳ **Active Boss Times** ⏳", ""]
+    embed = discord.Embed(
+        title="⏳ Active Boss Times ⏳",
+        color=discord.Color.teal()
+    )
 
     grouped = {group: [] for group in GROUP_ORDER}
 
-    for key, boss in BOSSES.items():
+    sorted_bosses = sorted(
+    BOSSES.items(),
+    key=lambda item: (
+        get_open_close_times(item[0])[0]
+        if item[0] in boss_timers else datetime.max.replace(tzinfo=timezone.utc)
+    )
+)
+
+for key, boss in sorted_bosses:
         has_timer = key in boss_timers
         should_show = key in ALWAYS_SHOW or has_timer
 
@@ -509,37 +520,35 @@ def build_board_text():
             open_seconds = (open_time - now_utc()).total_seconds()
             close_seconds = (close_time - now_utc()).total_seconds()
 
-            # Status logic
             if open_seconds > 0:
-                status = f"{format_remaining(open_time)}"
+                status = format_remaining(open_time)
                 prefix = ""
             elif close_seconds > 0:
-                status = f"🔥 OPEN ({format_remaining(close_time)} left)"
+                status = f"OPEN • {format_remaining(close_time)} left"
                 prefix = "🟢 "
             else:
-                status = "❌ EXPIRED"
+                status = "EXPIRED"
                 prefix = "🔴 "
-
         else:
             status = "-"
             prefix = ""
 
         grouped[boss["group"]].append(
-            f"{prefix}**{boss['display']}** • {status}"
+            f"{prefix}{boss['display']} • {status}"
         )
 
     for group in GROUP_ORDER:
         if not grouped[group]:
             continue
 
-        lines.append(f"✦ **{group}**")
-        lines.append("```")
-        lines.extend(grouped[group])
-        lines.append("```")
+        embed.add_field(
+            name=f"✦ {group}",
+            value="```" + "\n".join(grouped[group]) + "```",
+            inline=False
+        )
 
-    lines.append(f"🕒 {now_utc().strftime('%H:%M UTC')}")
-
-    return "\n".join(lines)
+    embed.set_footer(text=f"Game Time: {now_utc().strftime('%H:%M UTC')}")
+    return embed
 
 def build_info_text():
     lines = ["Boss Timers", ""]
@@ -570,12 +579,12 @@ async def update_display_board():
     if channel is None:
         channel = await bot.fetch_channel(DISPLAY_CHANNEL_ID)
 
-    content = build_board_text()
+    embed = build_board_embed()
 
     if display_message_id:
         try:
             msg = await channel.fetch_message(display_message_id)
-            await msg.edit(content=content)
+            await msg.edit(content=None, embed=embed)
             print(f"Board edited successfully: {display_message_id}")
             return
         except discord.NotFound:
@@ -583,7 +592,7 @@ async def update_display_board():
         except Exception as e:
             print(f"Edit existing board failed: {e}")
 
-    msg = await channel.send(content)
+    msg = await channel.send(embed=embed)
     display_message_id = msg.id
     save_display_message_id()
     print(f"Created new display message: {display_message_id}")
