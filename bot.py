@@ -550,7 +550,7 @@ async def check_due_boss_pings():
             if role_id:
                 message = f"<@&{role_id}> 🚨 {boss_name} is due in 1 minute. 🚨"
 
-            await channel.send(message, delete_after=600)
+            await channel.send(message, delete_after=30)
             pinged_bosses.add(boss_key)
 
 @tasks.loop(minutes=1)
