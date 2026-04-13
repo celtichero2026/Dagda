@@ -604,7 +604,7 @@ async def check_due_boss_pings():
 
             message_text = f"{boss_name} is due in 1 minute."
             if role_id:
-                message_text = f"<@&{role_id}> 🚨 {boss_name} is due in 1 minute. 🚨"
+                message_text = f"<@&{role_id}> 🚨 {boss_name} is due. 🚨"
 
             try:
                 msg = await channel.send(message_text)
