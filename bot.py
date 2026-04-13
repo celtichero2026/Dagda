@@ -633,15 +633,14 @@ async def reset_boss(interaction: discord.Interaction, boss: str):
 
 @bot.tree.command(
     name="set",
-    description="Manually set a boss using open and close times from now",
+    description="Manually set a boss using only the open time from now",
     guild=discord.Object(id=GUILD_ID),
 )
 @app_commands.describe(
     boss="Boss name or alias",
     open="Time until open, like 2h, 90m, or 1d2h",
-    close="Time until close, like 2h15m or 95m",
 )
-async def set_timer(interaction: discord.Interaction, boss: str, open: str, close: str):
+async def set_timer(interaction: discord.Interaction, boss: str, open: str):
     if not in_command_channel(interaction):
         await interaction.response.send_message(
             "Use this command in the configured command channel.",
@@ -656,22 +655,17 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str, clos
 
     try:
         open_minutes = parse_duration_to_minutes(open)
-        close_minutes = parse_duration_to_minutes(close)
     except ValueError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
-        return
-
-    if close_minutes < open_minutes:
-        await interaction.response.send_message(
-            "Close time cannot be earlier than open time.",
-            ephemeral=True,
-        )
         return
 
     try:
         set_boss_timer_from_open(boss_key, open_minutes)
-    except ValueError as e:
-        await interaction.response.send_message(str(e), ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(
+            f"Failed to set timer: {e}",
+            ephemeral=True,
+        )
         return
 
     open_time, close_time = get_open_close_times(boss_key)
