@@ -629,11 +629,11 @@ async def check_due_boss_pings():
             continue
 
         # create 1-minute-before alert and leave it through the window
-        if 0 <= seconds_until_open <= 120 and boss_key not in active_alert_messages:
+       if 120 < seconds_until_open <= 180 and boss_key not in active_alert_messages:
             role_id = get_ping_role_id(boss_key)
             boss_name = BOSSES[boss_key]["display"]
 
-            message_text = f"{boss_name} is due in 1 minute."
+            message_text = f"{boss_name} is due in 3 minute."
             if role_id:
                 message_text = f"<@&{role_id}> 🚨 {boss_name} is due. 🚨"
 
