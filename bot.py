@@ -615,7 +615,7 @@ async def check_due_boss_pings():
 
     current = now_utc()
 
-    for boss_key in list(boss_timers.keys()):
+for boss_key in list(boss_timers.keys()):
     if boss_key not in BOSSES:
         continue
 
@@ -628,7 +628,7 @@ async def check_due_boss_pings():
         pinged_bosses.discard(boss_key)
         continue
 
-    # create 3-minute-before alert and leave it through the window
+    # create 3-minute-before alert
     if 120 < seconds_until_open <= 180 and boss_key not in active_alert_messages:
         role_id = get_ping_role_id(boss_key)
         boss_name = BOSSES[boss_key]["display"]
