@@ -892,5 +892,72 @@ async def info(interaction: discord.Interaction):
             ephemeral=True,
         )
 
+@bot.tree.command(
+    name="when",
+    description="Show when a boss opens or closes in your local time",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    boss="Boss name or alias",
+)
+async def when(interaction: discord.Interaction, boss: str):
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    boss_key = find_boss_key(boss)
+    if not boss_key:
+        await interaction.response.send_message(
+            "Boss not found.",
+            ephemeral=True,
+        )
+        return
+
+    if boss_key not in boss_timers:
+        await interaction.response.send_message(
+            f"{BOSSES[boss_key]['display']} does not currently have an active timer.",
+            ephemeral=True,
+        )
+        return
+
+    boss_name = BOSSES[boss_key]["display"]
+    open_time, close_time = get_open_close_times(boss_key)
+    current = now_utc()
+
+    if open_time <= current <= close_time:
+        unix_close = int(close_time.timestamp())
+
+        embed = discord.Embed(
+            title=boss_name,
+            description="🔥 OPEN NOW",
+            color=discord.Color.red(),
+        )
+        embed.add_field(
+            name="Closes",
+            value=f"<t:{unix_close}:F>\n(<t:{unix_close}:R>)",
+            inline=False,
+        )
+    else:
+        unix_open = int(open_time.timestamp())
+
+        embed = discord.Embed(
+            title=boss_name,
+            description="⏳ Not open yet",
+            color=discord.Color.teal(),
+        )
+        embed.add_field(
+            name="Opens",
+            value=f"<t:{unix_open}:F>\n(<t:{unix_open}:R>)",
+            inline=False,
+        )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
 
 bot.run(TOKEN)
