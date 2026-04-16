@@ -1312,12 +1312,15 @@ async def server_clear(interaction: discord.Interaction):
         ephemeral=True,
     )
 
-@bot.tree.command(name="help", description="Show timer bot commands")
+@bot.tree.command(
+    name="help",
+    description="Show timer bot commands",
+    guild=discord.Object(id=GUILD_ID),
+)
 async def help_command(interaction: discord.Interaction):
-
     embed = discord.Embed(
         title="⚔️ TIMER BOT COMMANDS",
-        color=0x00d4aa  # nice teal vibe, change if you want
+        color=0x00D4AA
     )
 
     embed.description = (
