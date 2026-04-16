@@ -27,6 +27,9 @@ GUILD_ID = int(guild_id_raw)
 DATA_FILE = "boss_timers.json"
 MESSAGE_ID_FILE = "display_message.json"
 ALERTS_FILE = "boss_alerts.json"
+EVENT_FILE = "current_event.json"
+SERVER_RESET_FILE = "server_reset.json"
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -290,14 +293,44 @@ BOSSES = {
         "window_minutes": 5,
         "aliases": ["falg", "falgren"],
     },
+        "north": {
+        "display": "North",
+        "group": "RING",
+        "respawn_minutes": 3 * 60 + 35,
+        "window_minutes": 50,
+        "aliases": ["northring", "north"],
+    },
+    "center": {
+        "display": "Center",
+        "group": "RING",
+        "respawn_minutes": 3 * 60 + 35,
+        "window_minutes": 50,
+        "aliases": ["centre", "centrering", "centerring", "center"],
+    },
+    "south": {
+        "display": "South",
+        "group": "RING",
+        "respawn_minutes": 3 * 60 + 35,
+        "window_minutes": 50,
+        "aliases": ["southring", "south"],
+    },
+    "east": {
+        "display": "East",
+        "group": "RING",
+        "respawn_minutes": 3 * 60 + 35,
+        "window_minutes": 50,
+        "aliases": ["eastring", "east"],
+    },
 }
 
-GROUP_ORDER = ["ENDGAME", "MIDRAID", "EDL", "DL", "FROZEN", "METEORIC", "WARDEN"]
+GROUP_ORDER = ["ENDGAME", "MIDRAID", "EDL", "DL", "FROZEN", "METEORIC", "WARDEN", "RING"]
 
 boss_timers = {}
 display_message_id = None
 pinged_bosses = set()
 active_alert_messages = {}
+current_event_text = None
+server_reset_data = {}
 
 
 def get_ping_role_id(boss_key: str):
@@ -344,12 +377,42 @@ def load_json(path, fallback):
         return fallback
 
 
+def get_server_reset_time():
+    if not server_reset_data or "reset_time" not in server_reset_data:
+        return None
+    return datetime.fromisoformat(server_reset_data["reset_time"])
+
+
+def format_server_downtime():
+    if not server_reset_data:
+        return None
+    return server_reset_data.get("est_downtime")
+
+
+def parse_datetime_string(text: str):
+    # format: YYYY-MM-DD HH:MM
+    return datetime.strptime(text.strip(), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+
 def load_data():
-    global boss_timers, display_message_id, active_alert_messages
+    global boss_timers, display_message_id, active_alert_messages, current_event_text, server_reset_data
+
     boss_timers = load_json(DATA_FILE, {})
     msg_data = load_json(MESSAGE_ID_FILE, {})
     display_message_id = msg_data.get("message_id")
+
     active_alert_messages = load_json(ALERTS_FILE, {})
+
+    event_data = load_json(EVENT_FILE, {})
+    current_event_text = event_data.get("text")
+
+    server_reset_data = load_json(SERVER_RESET_FILE, {})
+
+def save_event():
+    save_json(EVENT_FILE, {"text": current_event_text})
+
+
+def save_server_reset():
+    save_json(SERVER_RESET_FILE, server_reset_data)
 
 
 def save_timers():
@@ -492,7 +555,6 @@ def build_board_embed():
         "necromancer",
         "mordris",
         "hrungnir",
-        "aggragoth",
     }
 
     has_active = any(is_in_window(k) for k in boss_timers)
@@ -502,6 +564,13 @@ def build_board_embed():
         title="⏳ Active Boss Times ⏳",
         color=color
     )
+
+    if current_event_text:
+        embed.add_field(
+            name="⚡ Current Events",
+            value=current_event_text,
+            inline=False
+        )
 
     grouped = {group: [] for group in GROUP_ORDER}
 
@@ -537,7 +606,15 @@ def build_board_embed():
                 status = f"🔥 OPEN NOW • {format_remaining(close_time)} left"
                 prefix = "🟢 "
             else:
-                status = "EXPIRED"
+                expired_for = now_utc() - close_time
+                total_seconds = int(expired_for.total_seconds())
+                hours, rem = divmod(total_seconds, 3600)
+                minutes = rem // 60
+                if hours > 0:
+                    expired_text = f"{hours}h {minutes}m ago"
+                else:
+                    expired_text = f"{minutes}m ago"
+                status = f"EXPIRED • {expired_text}"
                 prefix = "🔴 "
         else:
             status = "-"
@@ -554,6 +631,25 @@ def build_board_embed():
         embed.add_field(
             name=f"✦ {group}",
             value="```" + "\n".join(grouped[group]) + "```",
+            inline=False
+        )
+
+    reset_time = get_server_reset_time()
+    if reset_time:
+        seconds_until_reset = int((reset_time - now_utc()).total_seconds())
+        if seconds_until_reset > 0:
+            status = format_remaining(reset_time)
+        else:
+            status = "DUE"
+
+        server_text = f"🛠 Server Reset • {status}"
+        downtime = format_server_downtime()
+        if downtime:
+            server_text += f"\nEst. down time: {downtime}"
+
+        embed.add_field(
+            name="Server Reset",
+            value=server_text,
             inline=False
         )
 
@@ -647,6 +743,24 @@ async def check_due_boss_pings():
             except Exception as e:
                 print(f"Failed creating alert for {boss_key}: {e}")
 
+    reset_time = get_server_reset_time()
+    if reset_time:
+        seconds_until_reset = (reset_time - current).total_seconds()
+
+        if 0 <= seconds_until_reset <= 180 and not server_reset_data.get("alert_sent"):
+            downtime = format_server_downtime()
+            message_text = "🛠 Server Reset Due."
+            if downtime:
+                message_text += f" Est. down time: {downtime}"
+
+            try:
+                await channel.send(message_text)
+                server_reset_data["alert_sent"] = True
+                save_server_reset()
+                print("Server reset alert sent")
+            except Exception as e:
+                print(f"Failed server reset alert: {e}")
+
 
 @tasks.loop(minutes=1)
 async def auto_refresh_board():
@@ -724,6 +838,65 @@ async def on_message(message: discord.Message):
 def in_command_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id == COMMAND_CHANNEL_ID
 
+def get_bosses_in_group(group_name: str):
+    normalized = group_name.strip().upper()
+    return [key for key, boss in BOSSES.items() if boss["group"] == normalized]
+
+@bot.tree.command(
+    name="clear",
+    description="Clear all timers in one boss section",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    section="Boss section: endgame, midraid, edl, dl, frozen, meteoric, warden, ring",
+)
+async def clear_section(interaction: discord.Interaction, section: str):
+    global boss_timers, pinged_bosses
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    section_name = section.strip().upper()
+
+    if section_name not in GROUP_ORDER:
+        await interaction.response.send_message(
+            f"Invalid section. Use one of: {', '.join(GROUP_ORDER).lower()}",
+            ephemeral=True,
+        )
+        return
+
+    bosses_to_clear = get_bosses_in_group(section_name)
+    cleared_any = False
+
+    for boss_key in bosses_to_clear:
+        if boss_key in boss_timers:
+            del boss_timers[boss_key]
+            cleared_any = True
+
+        pinged_bosses.discard(boss_key)
+        await delete_alert_message_for_boss(boss_key)
+
+    save_timers()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after clear failed: {e}")
+
+    if cleared_any:
+        await interaction.response.send_message(
+            f"Cleared all timers in **{section_name}**.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            f"No active timers found in **{section_name}**.",
+            ephemeral=True,
+        )
 
 @bot.tree.command(
     name="wipe",
@@ -956,6 +1129,187 @@ async def when(interaction: discord.Interaction, boss: str):
 
     await interaction.response.send_message(
         embed=embed,
+        ephemeral=True,
+    )
+
+@bot.tree.command(
+    name="eventset",
+    description="Set the current event text",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    text="Current event text to show on the display board",
+)
+async def event_set(interaction: discord.Interaction, text: str):
+    global current_event_text
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    current_event_text = text
+    save_event()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after event set failed: {e}")
+
+    await interaction.response.send_message(
+        f"Current event set to:\n{text}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="eventclear",
+    description="Clear the current event text",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def event_clear(interaction: discord.Interaction):
+    global current_event_text
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    current_event_text = None
+    save_event()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after event clear failed: {e}")
+
+    await interaction.response.send_message(
+        "Current event cleared.",
+        ephemeral=True,
+    )
+
+@bot.tree.command(
+    name="serverset",
+    description="Set the server reset date and time",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    when="UTC format: YYYY-MM-DD HH:MM",
+    downtime="Optional estimated downtime, like 2-3 hrs",
+)
+async def server_set(interaction: discord.Interaction, when: str, downtime: str = None):
+    global server_reset_data
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        reset_time = parse_datetime_string(when)
+    except ValueError:
+        await interaction.response.send_message(
+            "Invalid date/time format. Use: YYYY-MM-DD HH:MM",
+            ephemeral=True,
+        )
+        return
+
+    server_reset_data = {
+        "reset_time": reset_time.isoformat(),
+        "est_downtime": downtime,
+        "alert_sent": False,
+    }
+    save_server_reset()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after server set failed: {e}")
+
+    await interaction.response.send_message(
+        f"Server reset set for {when} UTC.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="serverinfo",
+    description="Show the current server reset info",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def server_info(interaction: discord.Interaction):
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    reset_time = get_server_reset_time()
+    if not reset_time:
+        await interaction.response.send_message(
+            "No server reset is currently set.",
+            ephemeral=True,
+        )
+        return
+
+    unix_reset = int(reset_time.timestamp())
+    downtime = format_server_downtime()
+
+    embed = discord.Embed(
+        title="Server Reset",
+        color=discord.Color.orange(),
+    )
+    embed.add_field(
+        name="Scheduled",
+        value=f"<t:{unix_reset}:F>\n(<t:{unix_reset}:R>)",
+        inline=False,
+    )
+
+    if downtime:
+        embed.add_field(
+            name="Est. Downtime",
+            value=downtime,
+            inline=False,
+        )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="serverclear",
+    description="Clear the current server reset",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def server_clear(interaction: discord.Interaction):
+    global server_reset_data
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    server_reset_data = {}
+    save_server_reset()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after server clear failed: {e}")
+
+    await interaction.response.send_message(
+        "Server reset cleared.",
         ephemeral=True,
     )
 
