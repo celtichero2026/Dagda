@@ -1382,4 +1382,104 @@ async def help_command(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(
+    name="bosswindows",
+    description="Show boss open and close windows",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def bosswindows(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Boss Windows",
+        color=0x00D4AA
+    )
+
+    embed.description = (
+        f"**View Active Boss times here:**\n"
+        f"<#{DISPLAY_CHANNEL_ID}>"
+    )
+
+    embed.add_field(
+        name="ENDGAME",
+        value=(
+            "Crom's Manikin — Open: 96h | Close: 120h\n"
+            "Dhiothu — Open: 34h | Close: 62h\n"
+            "Bloodthorn — Open: 34h | Close: 62h\n"
+            "Gelebron — Open: 32h | Close: 60h\n"
+            "Proteus — Open: 18h | Close: 18h 15m"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="MIDRAID",
+        value=(
+            "Necromancer — Open: 22h | Close: 38h\n"
+            "Mordris — Open: 20h | Close: 36h\n"
+            "Hrungnir — Open: 22h | Close: 38h\n"
+            "Aggragoth — Open: 20h | Close: 36h"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="EDL",
+        value=(
+            "215 — Open: 2h 14m | Close: 2h 19m\n"
+            "210 — Open: 2h 5m | Close: 2h 10m\n"
+            "205 — Open: 1h 57m | Close: 2h 1m\n"
+            "200 — Open: 1h 48m | Close: 1h 53m\n"
+            "195 — Open: 1h 29m | Close: 1h 33m\n"
+            "190 — Open: 1h 21m | Close: 1h 24m\n"
+            "185 — Open: 1h 12m | Close: 1h 15m"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="DL",
+        value=(
+            "180 — Open: 1h 28m | Close: 1h 31m\n"
+            "170 — Open: 1h 18m | Close: 1h 21m\n"
+            "165 — Open: 1h 13m | Close: 1h 16m\n"
+            "160 — Open: 1h 8m | Close: 1h 11m\n"
+            "155 — Open: 1h 3m | Close: 1h 6m"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="FROZEN",
+        value=(
+            "Pyrus — Open: 58m | Close: 1h 1m\n"
+            "Grom — Open: 48m | Close: 51m\n"
+            "Chained — Open: 43m | Close: 46m\n"
+            "Woody — Open: 38m | Close: 41m\n"
+            "Swampie — Open: 33m | Close: 36m\n"
+            "Eye — Open: 28m | Close: 31m\n"
+            "Redbane — Open: 20m | Close: 25m"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="METEORIC / WARDEN",
+        value=(
+            "Coppinger — Open: 20m | Close: 25m\n"
+            "Rockbelly — Open: 15m | Close: 20m\n"
+            "Goretusk — Open: 20m | Close: 25m\n"
+            "Bonehead — Open: 15m | Close: 20m\n"
+            "Doomclaw — Open: 7m | Close: 12m\n\n"
+            "Falgren — Open: 45m | Close: 50m"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="RINGS",
+        value="North / Center / South / East — Open: 3h 35m | Close: 4h 25m",
+        inline=False,
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 bot.run(TOKEN)
