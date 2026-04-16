@@ -390,8 +390,7 @@ def format_server_downtime():
 
 
 def parse_datetime_string(text: str):
-    # format: YYYY-MM-DD HH:MM
-    return datetime.strptime(text.strip(), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+    return datetime.strptime(text.strip(), "%m/%d/%Y %H%M").replace(tzinfo=timezone.utc)
 
 def load_data():
     global boss_timers, display_message_id, active_alert_messages, current_event_text, server_reset_data
@@ -1198,7 +1197,7 @@ async def event_clear(interaction: discord.Interaction):
     guild=discord.Object(id=GUILD_ID),
 )
 @app_commands.describe(
-    when="UTC format: YYYY-MM-DD HH:MM",
+    when="Format: M/D/YYYY HHMM (example: 4/16/2026 0900)",
     downtime="Optional estimated downtime, like 2-3 hrs",
 )
 async def server_set(interaction: discord.Interaction, when: str, downtime: str = None):
