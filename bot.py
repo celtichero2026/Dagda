@@ -566,7 +566,7 @@ def build_board_embed():
 
     if current_event_text:
         embed.add_field(
-            name="⚡ Current Events",
+            name="📰 Current Events",
             value=current_event_text,
             inline=False
         )
@@ -1312,5 +1312,71 @@ async def server_clear(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+@bot.tree.command(name="help", description="Show timer bot commands")
+async def help_command(interaction: discord.Interaction):
+
+    embed = discord.Embed(
+        title="⚔️ TIMER BOT COMMANDS",
+        color=0x00d4aa  # nice teal vibe, change if you want
+    )
+
+    embed.description = (
+        f"**Post commands here:** <#{COMMAND_CHANNEL_ID}>\n\n"
+        f"Enter boss name in channel to set boss"
+    )
+
+    embed.add_field(
+        name="Boss Timers",
+        value=(
+            "`/set boss:[name] open:[time]` → set timer\n\n"
+            "`/reset boss:[name]` → remove one timer\n\n"
+            "`/clear section:[group]` → clear a section\n\n"
+            "`/wipe` → ⚠️ clear ALL timers"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Info",
+        value=(
+            "`/when boss:[name]` → shows your local time\n\n"
+            "`/info` → DM full timer list"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Event",
+        value=(
+            "`/eventset text:[message]` → set event banner\n\n"
+            "`/eventclear` → remove event"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Server Reset",
+        value=(
+            "`/serverset when:[MM/DD/YYYY HHMM] downtime:[optional]`\n\n"
+            "`/serverinfo` → view reset\n\n"
+            "`/serverclear` → remove reset"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Time Format",
+        value=(
+            "`30m` = minutes\n"
+            "`2h` = hours\n"
+            "`1d` = days\n"
+            "combo works → `1d2h30m`"
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(text="Use /when to check your local boss times")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 bot.run(TOKEN)
