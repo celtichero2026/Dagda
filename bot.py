@@ -392,7 +392,34 @@ def format_server_downtime():
 
 
 def parse_datetime_string(text: str):
-    return datetime.strptime(text.strip(), "%m/%d/%Y %H%M").replace(tzinfo=timezone.utc)
+    raw = text.strip()
+
+    formats = [
+        "%m/%d/%Y %H%M",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %I:%M %p",
+        "%m/%d/%Y %I%p",
+        "%m/%d %H%M",
+        "%m/%d %H:%M",
+        "%m/%d %I:%M %p",
+        "%m/%d %I%p",
+        "%Y-%m-%d %H:%M",
+    ]
+
+    current_year = now_utc().year
+
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(raw, fmt)
+
+            if "%Y" not in fmt:
+                dt = dt.replace(year=current_year)
+
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+    raise ValueError("Invalid date/time format.")
 
 def load_data():
     global boss_timers, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data
@@ -901,27 +928,56 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip().lower()
-    boss_key = find_boss_key(content)
+    parts = content.split()
+
+    if not parts:
+        return
+
+    boss_key = find_boss_key(parts[0])
 
     if not boss_key:
         return
 
     await delete_alert_message_for_boss(boss_key)
 
-    event_minutes = get_event_timer_minutes(boss_key)
-    if event_minutes is not None:
-        set_boss_timer_from_event(boss_key, event_minutes)
-        await message.channel.send(
-            f"{BOSSES[boss_key]['display']} set | Event {format_event_timer(event_minutes)}"
-        )
+    # 🔥 Manual override: "dhio 19h"
+    if len(parts) >= 2:
+        try:
+            manual_minutes = parse_duration_to_minutes(parts[1])
+
+            if parts[1].isdigit():
+                manual_minutes = int(parts[1]) * 60
+
+            set_boss_timer_from_open(boss_key, manual_minutes)
+
+            display_time = format_event_timer(manual_minutes)
+
+            await message.channel.send(
+                f"{BOSSES[boss_key]['display']} set | {display_time}"
+            )
+
+        except ValueError:
+            return
+
+    # 🧠 Normal behavior: just "dhio"
     else:
-        set_boss_timer_now(boss_key)
+        event_minutes = get_event_timer_minutes(boss_key)
 
-        open_time, close_time = get_open_close_times(boss_key)
+        if event_minutes is not None:
+            set_boss_timer_from_event(boss_key, event_minutes)
 
-        await message.channel.send(
-            f"{BOSSES[boss_key]['display']} open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
-        )
+            await message.channel.send(
+                f"{BOSSES[boss_key]['display']} set | Event {format_event_timer(event_minutes)}"
+            )
+
+        else:
+            set_boss_timer_now(boss_key)
+
+            open_time, close_time = get_open_close_times(boss_key)
+
+            await message.channel.send(
+                f"{BOSSES[boss_key]['display']} open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
+            )
 
     try:
         await update_display_board()
@@ -931,6 +987,9 @@ async def on_message(message: discord.Message):
 
 def in_command_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id == COMMAND_CHANNEL_ID
+
+def in_command_or_display_channel(interaction: discord.Interaction) -> bool:
+    return interaction.channel_id in [COMMAND_CHANNEL_ID, DISPLAY_CHANNEL_ID]
 
 def get_bosses_in_group(group_name: str):
     normalized = group_name.strip().upper()
@@ -1002,7 +1061,7 @@ async def wipe(interaction: discord.Interaction):
 
     if not in_command_channel(interaction):
         await interaction.response.send_message(
-            "Use this command in the configured command channel.",
+            "Use this command in the command or display channel.",
             ephemeral=True,
         )
         return
@@ -1099,11 +1158,44 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str = Non
 
     boss_key = find_boss_key(boss)
     if not boss_key:
-        await interaction.response.send_message("Boss not found.", ephemeral=True)
+        await interaction.response.send_message(
+            "Boss not found.",
+            ephemeral=True,
+        )
         return
 
     await delete_alert_message_for_boss(boss_key)
 
+    # 🔥 Manual override ALWAYS wins
+    if open is not None:
+        try:
+            open_minutes = parse_duration_to_minutes(open)
+            set_boss_timer_from_open(boss_key, open_minutes)
+        except ValueError as e:
+            await interaction.response.send_message(
+                str(e),
+                ephemeral=True,
+            )
+            return
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Failed to set timer: {e}",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await update_display_board()
+        except Exception as e:
+            print(f"Board update after set failed: {e}")
+
+        await interaction.response.send_message(
+            f"{BOSSES[boss_key]['display']} set | {format_event_timer(open_minutes)}",
+            ephemeral=False,
+        )
+        return
+
+    # 🧠 Event logic (only if no manual override)
     event_minutes = get_event_timer_minutes(boss_key)
     if event_minutes is not None:
         try:
@@ -1126,15 +1218,9 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str = Non
         )
         return
 
+    # 🧩 Normal default behavior
     try:
-        if open is None:
-            set_boss_timer_now(boss_key)
-        else:
-            open_minutes = parse_duration_to_minutes(open)
-            set_boss_timer_from_open(boss_key, open_minutes)
-    except ValueError as e:
-        await interaction.response.send_message(str(e), ephemeral=True)
-        return
+        set_boss_timer_now(boss_key)
     except Exception as e:
         await interaction.response.send_message(
             f"Failed to set timer: {e}",
@@ -1191,7 +1277,7 @@ async def info(interaction: discord.Interaction):
     boss="Boss name or alias",
 )
 async def when(interaction: discord.Interaction, boss: str):
-    if not in_command_channel(interaction):
+    if not in_command_or_display_channel(interaction):
         await interaction.response.send_message(
             "Use this command in the configured command channel.",
             ephemeral=True,
@@ -1380,7 +1466,7 @@ async def event_clear(interaction: discord.Interaction):
     guild=discord.Object(id=GUILD_ID),
 )
 @app_commands.describe(
-    when="Format: M/D/YYYY HHMM (example: 4/16/2026 0900)",
+    when="Example: 4/28 0900, 4/28/2026 9:00 AM, or 2026-04-28 09:00",
     downtime="Optional estimated downtime, like 2-3 hrs",
 )
 async def server_set(interaction: discord.Interaction, when: str, downtime: str = None):
@@ -1397,7 +1483,7 @@ async def server_set(interaction: discord.Interaction, when: str, downtime: str 
         reset_time = parse_datetime_string(when)
     except ValueError:
         await interaction.response.send_message(
-            "Invalid date/time format. Use: YYYY-MM-DD HH:MM",
+            "Invalid date/time. Try: `4/28 0900`, `4/28/2026 9:00 AM`, or `2026-04-28 09:00",
             ephemeral=True,
         )
         return
@@ -1421,14 +1507,14 @@ async def server_set(interaction: discord.Interaction, when: str, downtime: str 
 
 
 @bot.tree.command(
-    name="serverinfo",
-    description="Show the current server reset info",
+    name="serverwhen",
+    description="Show when the server resets",
     guild=discord.Object(id=GUILD_ID),
 )
-async def server_info(interaction: discord.Interaction):
-    if not in_command_channel(interaction):
+async def server_when(interaction: discord.Interaction):
+    if not in_command_or_display_channel(interaction):
         await interaction.response.send_message(
-            "Use this command in the configured command channel.",
+            "Use this command in the command or display channel.",
             ephemeral=True,
         )
         return
@@ -1546,7 +1632,7 @@ async def help_command(interaction: discord.Interaction):
         name="Server Reset",
         value=(
             "`/serverset when:[MM/DD/YYYY HHMM] downtime:[optional]`\n\n"
-            "`/serverinfo` → view reset\n\n"
+            "`/serverwhen` → view reset\n\n"
             "`/serverclear` → remove reset"
         ),
         inline=False,
