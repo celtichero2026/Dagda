@@ -28,6 +28,7 @@ DATA_FILE = "boss_timers.json"
 MESSAGE_ID_FILE = "display_message.json"
 ALERTS_FILE = "boss_alerts.json"
 EVENT_FILE = "current_event.json"
+EVENT_TIMER_FILE = "event_timers.json"
 SERVER_RESET_FILE = "server_reset.json"
 
 
@@ -330,6 +331,7 @@ display_message_id = None
 pinged_bosses = set()
 active_alert_messages = {}
 current_event_text = None
+event_timer_data = {"active": False, "bosses": {}}
 server_reset_data = {}
 
 
@@ -393,7 +395,7 @@ def parse_datetime_string(text: str):
     return datetime.strptime(text.strip(), "%m/%d/%Y %H%M").replace(tzinfo=timezone.utc)
 
 def load_data():
-    global boss_timers, display_message_id, active_alert_messages, current_event_text, server_reset_data
+    global boss_timers, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data
 
     boss_timers = load_json(DATA_FILE, {})
     msg_data = load_json(MESSAGE_ID_FILE, {})
@@ -404,10 +406,20 @@ def load_data():
     event_data = load_json(EVENT_FILE, {})
     current_event_text = event_data.get("text")
 
+    event_timer_data = load_json(EVENT_TIMER_FILE, {"active": False, "bosses": {}})
+    if "active" not in event_timer_data:
+        event_timer_data = {"active": False, "bosses": {}}
+    if "bosses" not in event_timer_data or not isinstance(event_timer_data.get("bosses"), dict):
+        event_timer_data["bosses"] = {}
+
     server_reset_data = load_json(SERVER_RESET_FILE, {})
 
 def save_event():
     save_json(EVENT_FILE, {"text": current_event_text})
+
+
+def save_event_timers():
+    save_json(EVENT_TIMER_FILE, event_timer_data)
 
 
 def save_server_reset():
@@ -542,6 +554,81 @@ def parse_duration_to_minutes(text: str) -> int:
         total += int(number)
 
     return total
+
+
+def parse_event_timer_to_minutes(text: str) -> int:
+    cleaned = text.lower().strip().replace(" ", "")
+
+    # For respawn events, plain numbers mean hours.
+    if cleaned.isdigit():
+        return int(cleaned) * 60
+
+    if cleaned.endswith("hrs"):
+        cleaned = cleaned[:-3] + "h"
+    elif cleaned.endswith("hr"):
+        cleaned = cleaned[:-2] + "h"
+    elif cleaned.endswith("hours"):
+        cleaned = cleaned[:-5] + "h"
+    elif cleaned.endswith("hour"):
+        cleaned = cleaned[:-4] + "h"
+
+    return parse_duration_to_minutes(cleaned)
+
+
+def format_event_timer(minutes: int) -> str:
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    hours, mins = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
+def get_event_timer_minutes(boss_key: str):
+    if not event_timer_data.get("active"):
+        return None
+    bosses = event_timer_data.get("bosses", {})
+    return bosses.get(boss_key)
+
+
+def set_boss_timer_from_event(boss_key: str, event_minutes: int):
+    boss = BOSSES[boss_key]
+    open_time = now_utc() + timedelta(minutes=event_minutes)
+    kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
+    boss_timers[boss_key] = kill_time.isoformat()
+    pinged_bosses.discard(boss_key)
+    save_timers()
+    return kill_time
+
+
+def parse_eventstart_pairs(text: str):
+    parts = text.split()
+    if not parts:
+        raise ValueError("Use: /eventstart dhio 20h bt 20h gele 20h")
+
+    if len(parts) % 2 != 0:
+        raise ValueError("Event timers must be boss/timer pairs, like: dhio 20h bt 20h")
+
+    if len(parts) // 2 > 9:
+        raise ValueError("You can set up to 9 bosses in one /eventstart command.")
+
+    parsed = {}
+
+    for i in range(0, len(parts), 2):
+        boss_alias = parts[i]
+        timer_text = parts[i + 1]
+
+        boss_key = find_boss_key(boss_alias)
+        if not boss_key:
+            raise ValueError(f"Boss not found: {boss_alias}")
+
+        minutes = parse_event_timer_to_minutes(timer_text)
+        if minutes <= 0:
+            raise ValueError(f"Invalid timer for {boss_alias}: {timer_text}")
+
+        parsed[boss_key] = minutes
+
+    return parsed
 
 
 def build_board_embed():
@@ -820,13 +907,21 @@ async def on_message(message: discord.Message):
         return
 
     await delete_alert_message_for_boss(boss_key)
-    set_boss_timer_now(boss_key)
 
-    open_time, close_time = get_open_close_times(boss_key)
+    event_minutes = get_event_timer_minutes(boss_key)
+    if event_minutes is not None:
+        set_boss_timer_from_event(boss_key, event_minutes)
+        await message.channel.send(
+            f"{BOSSES[boss_key]['display']} set | Event {format_event_timer(event_minutes)}"
+        )
+    else:
+        set_boss_timer_now(boss_key)
 
-    await message.channel.send(
-        f"{BOSSES[boss_key]['display']} open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
-    )
+        open_time, close_time = get_open_close_times(boss_key)
+
+        await message.channel.send(
+            f"{BOSSES[boss_key]['display']} open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}"
+        )
 
     try:
         await update_display_board()
@@ -987,14 +1082,14 @@ async def reset_boss(interaction: discord.Interaction, boss: str):
 
 @bot.tree.command(
     name="set",
-    description="Manually set a boss using only the open time from now",
+    description="Set a boss timer",
     guild=discord.Object(id=GUILD_ID),
 )
 @app_commands.describe(
     boss="Boss name or alias",
-    open="Time until open, like 2h, 90m, or 1d2h",
+    open="Optional time until open, like 2h, 90m, or 1d2h",
 )
-async def set_timer(interaction: discord.Interaction, boss: str, open: str):
+async def set_timer(interaction: discord.Interaction, boss: str, open: str = None):
     if not in_command_channel(interaction):
         await interaction.response.send_message(
             "Use this command in the configured command channel.",
@@ -1007,16 +1102,39 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str):
         await interaction.response.send_message("Boss not found.", ephemeral=True)
         return
 
+    await delete_alert_message_for_boss(boss_key)
+
+    event_minutes = get_event_timer_minutes(boss_key)
+    if event_minutes is not None:
+        try:
+            set_boss_timer_from_event(boss_key, event_minutes)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Failed to set event timer: {e}",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await update_display_board()
+        except Exception as e:
+            print(f"Board update after event set failed: {e}")
+
+        await interaction.response.send_message(
+            f"{BOSSES[boss_key]['display']} set | Event {format_event_timer(event_minutes)}",
+            ephemeral=False,
+        )
+        return
+
     try:
-        open_minutes = parse_duration_to_minutes(open)
+        if open is None:
+            set_boss_timer_now(boss_key)
+        else:
+            open_minutes = parse_duration_to_minutes(open)
+            set_boss_timer_from_open(boss_key, open_minutes)
     except ValueError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
         return
-
-    await delete_alert_message_for_boss(boss_key)
-
-    try:
-        set_boss_timer_from_open(boss_key, open_minutes)
     except Exception as e:
         await interaction.response.send_message(
             f"Failed to set timer: {e}",
@@ -1032,8 +1150,8 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str):
         print(f"Board update after set failed: {e}")
 
     await interaction.response.send_message(
-        f"{BOSSES[boss_key]['display']} set: open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}",
-        ephemeral=True,
+        f"{BOSSES[boss_key]['display']} open in {format_remaining(open_time)} | closes in {format_remaining(close_time)}",
+        ephemeral=False,
     )
 
 
@@ -1132,14 +1250,14 @@ async def when(interaction: discord.Interaction, boss: str):
     )
 
 @bot.tree.command(
-    name="eventset",
+    name="eventmessage",
     description="Set the current event text",
     guild=discord.Object(id=GUILD_ID),
 )
 @app_commands.describe(
     text="Current event text to show on the display board",
 )
-async def event_set(interaction: discord.Interaction, text: str):
+async def event_message(interaction: discord.Interaction, text: str):
     global current_event_text
 
     if not in_command_channel(interaction):
@@ -1155,11 +1273,76 @@ async def event_set(interaction: discord.Interaction, text: str):
     try:
         await update_display_board()
     except Exception as e:
-        print(f"Board update after event set failed: {e}")
+        print(f"Board update after event message failed: {e}")
 
     await interaction.response.send_message(
         f"Current event set to:\n{text}",
         ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="eventstart",
+    description="Start respawn event mode for up to 9 bosses",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    timers="Boss/timer pairs, like: dhio 20h bt 20h gele 20h crom 30h",
+)
+async def event_start(interaction: discord.Interaction, timers: str):
+    global event_timer_data
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        parsed = parse_eventstart_pairs(timers)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        return
+
+    event_timer_data = {
+        "active": True,
+        "bosses": parsed,
+    }
+    save_event_timers()
+
+    boss_list = ", ".join(
+        f"{BOSSES[boss_key]['display']} ({format_event_timer(minutes)})"
+        for boss_key, minutes in parsed.items()
+    )
+
+    await interaction.response.send_message(
+        f"Respawn event started.\n{boss_list}",
+        ephemeral=False,
+    )
+
+
+@bot.tree.command(
+    name="eventstop",
+    description="Stop respawn event mode and resume normal boss windows",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def event_stop(interaction: discord.Interaction):
+    global event_timer_data
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    event_timer_data = {"active": False, "bosses": {}}
+    save_event_timers()
+
+    await interaction.response.send_message(
+        "Respawn event ended. Normal timers resumed.",
+        ephemeral=False,
     )
 
 
@@ -1351,8 +1534,10 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="Event",
         value=(
-            "`/eventset text:[message]` → set event banner\n\n"
-            "`/eventclear` → remove event"
+            "`/eventmessage text:[message]` → set event banner\n\n"
+            "`/eventclear` → remove event banner\n\n"
+            "`/eventstart timers:[dhio 20h bt 20h]` → start respawn event mode\n\n"
+            "`/eventstop` → stop respawn event mode"
         ),
         inline=False,
     )
