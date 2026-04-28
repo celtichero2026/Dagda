@@ -695,6 +695,15 @@ def build_board_embed():
 
     grouped = {group: [] for group in GROUP_ORDER}
 
+    event_active = event_timer_data.get("active", False)
+    event_bosses = set(event_timer_data.get("bosses", {}).keys())
+
+    event_groups = {
+        BOSSES[boss_key]["group"]
+        for boss_key in event_bosses
+        if boss_key in BOSSES
+    }
+
     sorted_bosses = sorted(
         BOSSES.items(),
         key=lambda item: (
@@ -741,14 +750,23 @@ def build_board_embed():
             status = "-"
             prefix = ""
 
-        grouped[boss["group"]].append(f"{prefix}{boss['display']:<16} • {status}")
+        event_marker = "⚡ " if event_active and key in event_bosses else ""
+
+        grouped[boss["group"]].append(
+            f"{prefix}{boss['display']:<16} • {event_marker}{status}"
+        )
 
     for group in GROUP_ORDER:
         if not grouped[group]:
             continue
 
+        group_title = f"✦ {group}"
+
+        if event_active and group in event_groups:
+            group_title = f"✦ {group} | Event Active ⚡"
+
         embed.add_field(
-            name=f"✦ {group}",
+            name=group_title,
             value="```" + "\n".join(grouped[group]) + "```",
             inline=False,
         )
@@ -920,6 +938,8 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
+    global server_reset_data
+
     if message.author.bot:
         return
 
@@ -930,6 +950,31 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip().lower()
+
+    # 🟢 Server back up shortcut
+    if content == "up":
+        server_reset_data = {}
+        save_server_reset()
+
+        try:
+            await update_display_board()
+        except Exception as e:
+            print(f"Board update after server up failed: {e}")
+
+        await message.add_reaction("✅")
+
+        await message.channel.send(
+            "✅ Server marked **UP**.\n"
+            "🛠 Server reset cleared.\n\n"
+            "**Respawn event active?**\n"
+            "Use:\n"
+            "`/eventstart timers:dhio 20h bt 20h gele 20h crom 30h`\n\n"
+            "**No respawn event?**\n"
+            "Use:\n"
+            "`/eventstop`"
+        )
+        return
+
     parts = content.split()
 
     if not parts:
@@ -985,6 +1030,8 @@ async def on_message(message: discord.Message):
         await update_display_board()
     except Exception as e:
         print(f"Immediate update after message failed: {e}")
+
+    await bot.process_commands(message)
 
 
 def in_command_channel(interaction: discord.Interaction) -> bool:
