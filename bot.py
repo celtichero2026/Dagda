@@ -294,7 +294,7 @@ BOSSES = {
         "window_minutes": 5,
         "aliases": ["falg", "falgren"],
     },
-        "north": {
+    "north": {
         "display": "North",
         "group": "RING",
         "respawn_minutes": 3 * 60 + 35,
@@ -324,7 +324,16 @@ BOSSES = {
     },
 }
 
-GROUP_ORDER = ["ENDGAME", "MIDRAID", "EDL", "DL", "FROZEN", "METEORIC", "WARDEN", "RING"]
+GROUP_ORDER = [
+    "ENDGAME",
+    "MIDRAID",
+    "EDL",
+    "DL",
+    "FROZEN",
+    "METEORIC",
+    "WARDEN",
+    "RING",
+]
 
 boss_timers = {}
 display_message_id = None
@@ -421,6 +430,7 @@ def parse_datetime_string(text: str):
 
     raise ValueError("Invalid date/time format.")
 
+
 def load_data():
     global boss_timers, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data
 
@@ -436,10 +446,13 @@ def load_data():
     event_timer_data = load_json(EVENT_TIMER_FILE, {"active": False, "bosses": {}})
     if "active" not in event_timer_data:
         event_timer_data = {"active": False, "bosses": {}}
-    if "bosses" not in event_timer_data or not isinstance(event_timer_data.get("bosses"), dict):
+    if "bosses" not in event_timer_data or not isinstance(
+        event_timer_data.get("bosses"), dict
+    ):
         event_timer_data["bosses"] = {}
 
     server_reset_data = load_json(SERVER_RESET_FILE, {})
+
 
 def save_event():
     save_json(EVENT_FILE, {"text": current_event_text})
@@ -673,16 +686,11 @@ def build_board_embed():
     has_active = any(is_in_window(k) for k in boss_timers)
     color = discord.Color.red() if has_active else discord.Color.teal()
 
-    embed = discord.Embed(
-        title="⏳ Active Boss Times ⏳",
-        color=color
-    )
+    embed = discord.Embed(title="⏳ Active Boss Times ⏳", color=color)
 
     if current_event_text:
         embed.add_field(
-            name="📰 Current Events",
-            value=current_event_text,
-            inline=False
+            name="📰 Current Events", value=current_event_text, inline=False
         )
 
     grouped = {group: [] for group in GROUP_ORDER}
@@ -693,7 +701,7 @@ def build_board_embed():
             get_open_close_times(item[0])[0]
             if item[0] in boss_timers
             else datetime.max.replace(tzinfo=timezone.utc)
-        )
+        ),
     )
 
     for key, boss in sorted_bosses:
@@ -733,9 +741,7 @@ def build_board_embed():
             status = "-"
             prefix = ""
 
-        grouped[boss["group"]].append(
-            f"{prefix}{boss['display']:<16} • {status}"
-        )
+        grouped[boss["group"]].append(f"{prefix}{boss['display']:<16} • {status}")
 
     for group in GROUP_ORDER:
         if not grouped[group]:
@@ -744,7 +750,7 @@ def build_board_embed():
         embed.add_field(
             name=f"✦ {group}",
             value="```" + "\n".join(grouped[group]) + "```",
-            inline=False
+            inline=False,
         )
 
     reset_time = get_server_reset_time()
@@ -760,11 +766,7 @@ def build_board_embed():
         if downtime:
             server_text += f"\nEst. down time: {downtime}"
 
-        embed.add_field(
-            name="Server Reset",
-            value=server_text,
-            inline=False
-        )
+        embed.add_field(name="Server Reset", value=server_text, inline=False)
 
     embed.set_footer(text=f"Game Time: {now_utc().strftime('%H:%M UTC')}")
     return embed
@@ -943,7 +945,7 @@ async def on_message(message: discord.Message):
     # 🔥 Manual override: "dhio 19h"
     if len(parts) >= 2:
         try:
-            manual_minutes = parse_duration_to_minutes(parts[1])
+            manual_minutes = parse_duration_to_minutes("".join(parts[1:]))
 
             if parts[1].isdigit():
                 manual_minutes = int(parts[1]) * 60
@@ -988,12 +990,15 @@ async def on_message(message: discord.Message):
 def in_command_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id == COMMAND_CHANNEL_ID
 
+
 def in_command_or_display_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id in [COMMAND_CHANNEL_ID, DISPLAY_CHANNEL_ID]
+
 
 def get_bosses_in_group(group_name: str):
     normalized = group_name.strip().upper()
     return [key for key, boss in BOSSES.items() if boss["group"] == normalized]
+
 
 @bot.tree.command(
     name="clear",
@@ -1051,6 +1056,7 @@ async def clear_section(interaction: discord.Interaction, section: str):
             ephemeral=True,
         )
 
+
 @bot.tree.command(
     name="wipe",
     description="Reset all boss timers",
@@ -1087,9 +1093,7 @@ async def wipe(interaction: discord.Interaction):
     if channel is None:
         channel = await bot.fetch_channel(COMMAND_CHANNEL_ID)
 
-    await channel.send(
-        f"⚠️ **Boss timers wiped by {user.mention}**"
-    )
+    await channel.send(f"⚠️ **Boss timers wiped by {user.mention}**")
 
 
 @bot.tree.command(
@@ -1268,6 +1272,7 @@ async def info(interaction: discord.Interaction):
             ephemeral=True,
         )
 
+
 @bot.tree.command(
     name="when",
     description="Show when a boss opens or closes in your local time",
@@ -1334,6 +1339,7 @@ async def when(interaction: discord.Interaction, boss: str):
         embed=embed,
         ephemeral=True,
     )
+
 
 @bot.tree.command(
     name="eventmessage",
@@ -1460,6 +1466,7 @@ async def event_clear(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+
 @bot.tree.command(
     name="serverset",
     description="Set the server reset date and time",
@@ -1581,16 +1588,125 @@ async def server_clear(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+
+def parse_since_time(text: str):
+    raw = text.strip().replace(":", "")
+
+    if not raw.isdigit() or len(raw) not in [3, 4]:
+        raise ValueError("Use time like `1637` or `16:37`.")
+
+    if len(raw) == 3:
+        hour = int(raw[0])
+        minute = int(raw[1:])
+    else:
+        hour = int(raw[:2])
+        minute = int(raw[2:])
+
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("Invalid time. Use 24-hour UTC time like `1637`.")
+
+    now = now_utc()
+    from_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    if from_time > now:
+        from_time = from_time - timedelta(days=1)
+
+    return from_time
+
+
+def parse_since_timer_pairs(text: str):
+    parts = text.split()
+
+    if not parts:
+        raise ValueError("Use boss/timer pairs like: `prot 4h13m gele 18h28m`")
+
+    if len(parts) % 2 != 0:
+        raise ValueError(
+            "Timers must be boss/timer pairs, like: `prot 4h13m gele 18h28m`"
+        )
+
+    parsed = []
+
+    for i in range(0, len(parts), 2):
+        boss_alias = parts[i]
+        timer_text = parts[i + 1]
+
+        boss_key = find_boss_key(boss_alias)
+        if not boss_key:
+            raise ValueError(f"Boss not found: {boss_alias}")
+
+        minutes = parse_duration_to_minutes(timer_text)
+        parsed.append((boss_key, minutes))
+
+    return parsed
+
+
+@bot.tree.command(
+    name="since",
+    description="Calculate updated timer values from an old board time",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    from_time="Old board/game time in UTC, like 1637 or 16:37",
+    timers="Boss/timer pairs, like: prot 4h13m gele 18h28m hrung 9h39m",
+)
+async def since(
+    interaction: discord.Interaction,
+    from_time: str,
+    timers: str,
+):
+    if not in_command_or_display_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the command or display channel.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        old_time = parse_since_time(from_time)
+        parsed = parse_since_timer_pairs(timers)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        return
+
+    elapsed_minutes = int((now_utc() - old_time).total_seconds() // 60)
+
+    result_lines = []
+    command_lines = []
+
+    for boss_key, original_minutes in parsed:
+        remaining = original_minutes - elapsed_minutes
+
+        boss_name = BOSSES[boss_key]["display"]
+
+        if remaining <= 0:
+            result_lines.append(f"{boss_name} → DUE")
+            command_lines.append(f"{boss_key}")
+        else:
+            formatted = format_event_timer(remaining)
+            result_lines.append(f"{boss_name} → {formatted}")
+            command_lines.append(f"{boss_key} {formatted}")
+
+    elapsed_text = format_event_timer(elapsed_minutes)
+
+    response = (
+        f"Elapsed since {from_time}: **{elapsed_text}**\n\n"
+        "**Updated timers:**\n"
+        + "\n".join(result_lines)
+        + "\n\n**Copy/paste to set:**\n```"
+        + "\n".join(command_lines)
+        + "```"
+    )
+
+    await interaction.response.send_message(response, ephemeral=True)
+
 @bot.tree.command(
     name="help",
     description="Show timer bot commands",
     guild=discord.Object(id=GUILD_ID),
 )
 async def help_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="⚔️ TIMER BOT COMMANDS",
-        color=0x00D4AA
-    )
+    embed = discord.Embed(title="⚔️ TIMER BOT COMMANDS", color=0x00D4AA)
 
     embed.description = (
         f"**Post commands here:** <#{COMMAND_CHANNEL_ID}>\n\n"
@@ -1653,21 +1769,16 @@ async def help_command(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
 @bot.tree.command(
     name="bosswindows",
     description="Show boss open and close windows",
     guild=discord.Object(id=GUILD_ID),
 )
 async def bosswindows(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Boss Windows",
-        color=0x00D4AA
-    )
+    embed = discord.Embed(title="Boss Windows", color=0x00D4AA)
 
-    embed.description = (
-        f"**View Active Boss times here:**\n"
-        f"<#{DISPLAY_CHANNEL_ID}>"
-    )
+    embed.description = f"**View Active Boss times here:**\n" f"<#{DISPLAY_CHANNEL_ID}>"
 
     embed.add_field(
         name="ENDGAME",
@@ -1752,5 +1863,6 @@ async def bosswindows(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 bot.run(TOKEN)
