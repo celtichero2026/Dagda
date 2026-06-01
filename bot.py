@@ -990,19 +990,41 @@ async def on_message(message: discord.Message):
     # 🔥 Manual override: "dhio 19h"
     if len(parts) >= 2:
         try:
-            manual_minutes = parse_duration_to_minutes("".join(parts[1:]))
-
-            if parts[1].isdigit():
-                manual_minutes = int(parts[1]) * 60
-
-            set_boss_timer_from_open(boss_key, manual_minutes)
-
-            display_time = format_event_timer(manual_minutes)
-
-            await message.channel.send(
-                f"{BOSSES[boss_key]['display']} set | {display_time}"
-            )
-
+            time_text = "".join(parts[1:]).lower()
+        
+            # +/- adjustment from default timer
+            if time_text.startswith("+") or time_text.startswith("-"):
+        
+                adjustment = parse_duration_to_minutes(time_text[1:])
+        
+                base_minutes = get_event_timer_minutes(boss_key)
+        
+                if base_minutes is None:
+                    base_minutes = BOSSES[boss_key]["respawn_minutes"]
+        
+                if time_text.startswith("-"):
+                    final_minutes = max(0, base_minutes - adjustment)
+                else:
+                    final_minutes = base_minutes + adjustment
+        
+                set_boss_timer_from_open(boss_key, final_minutes)
+        
+                await message.channel.send(
+                    f"{BOSSES[boss_key]['display']} set | {format_event_timer(final_minutes)}"
+                )
+        
+            else:
+                manual_minutes = parse_duration_to_minutes(time_text)
+        
+                if parts[1].isdigit():
+                    manual_minutes = int(parts[1]) * 60
+        
+                set_boss_timer_from_open(boss_key, manual_minutes)
+        
+                await message.channel.send(
+                    f"{BOSSES[boss_key]['display']} set | {format_event_timer(manual_minutes)}"
+                )
+        
         except ValueError:
             return
 
