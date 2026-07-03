@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -24,13 +25,50 @@ DISPLAY_CHANNEL_ID = int(display_channel_raw)
 COMMAND_CHANNEL_ID = int(command_channel_raw)
 GUILD_ID = int(guild_id_raw)
 
-DATA_FILE = "boss_timers.json"
-MESSAGE_ID_FILE = "display_message.json"
-ALERTS_FILE = "boss_alerts.json"
-EVENT_FILE = "current_event.json"
-EVENT_TIMER_FILE = "event_timers.json"
-SERVER_RESET_FILE = "server_reset.json"
-TIMER_HISTORY_FILE = "timer_history.json"
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def data_path(filename: str) -> Path:
+    return DATA_DIR / filename
+
+
+DATA_FILE = data_path("boss_timers.json")
+MESSAGE_ID_FILE = data_path("display_message.json")
+ALERTS_FILE = data_path("boss_alerts.json")
+EVENT_FILE = data_path("current_event.json")
+EVENT_TIMER_FILE = data_path("event_timers.json")
+SERVER_RESET_FILE = data_path("server_reset.json")
+TIMER_HISTORY_FILE = data_path("timer_history.json")
+
+
+
+def migrate_legacy_data_files():
+    """Copy old JSON save files into DATA_DIR once, if the new persistent files do not exist yet."""
+    filenames = [
+        "boss_timers.json",
+        "display_message.json",
+        "boss_alerts.json",
+        "current_event.json",
+        "event_timers.json",
+        "server_reset.json",
+        "timer_history.json",
+    ]
+
+    for filename in filenames:
+        legacy_path = Path(filename)
+        new_path = DATA_DIR / filename
+
+        if legacy_path.exists() and not new_path.exists():
+            try:
+                new_path.write_text(legacy_path.read_text(encoding="utf-8"), encoding="utf-8")
+                print(f"Migrated {filename} to {DATA_DIR}")
+            except Exception as e:
+                print(f"Failed migrating {filename}: {e}")
+
+
+migrate_legacy_data_files()
 
 
 intents = discord.Intents.default()
@@ -397,11 +435,14 @@ def now_utc():
 
 
 def save_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
 def load_json(path, fallback):
+    path = Path(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
