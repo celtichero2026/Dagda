@@ -30,6 +30,7 @@ ALERTS_FILE = "boss_alerts.json"
 EVENT_FILE = "current_event.json"
 EVENT_TIMER_FILE = "event_timers.json"
 SERVER_RESET_FILE = "server_reset.json"
+TIMER_HISTORY_FILE = "timer_history.json"
 
 
 intents = discord.Intents.default()
@@ -45,6 +46,7 @@ role_dl_raw = os.getenv("ROLE_DL_ID")
 role_frozen_raw = os.getenv("ROLE_FROZEN_ID")
 role_meteoric_raw = os.getenv("ROLE_METEORIC_ID")
 role_warden_raw = os.getenv("ROLE_WARDEN_ID")
+timer_manager_role_raw = os.getenv("TIMER_MANAGER_ROLE_ID")
 
 ROLE_ENDGAME_ID = int(role_endgame_raw) if role_endgame_raw else None
 ROLE_MIDRAID_ID = int(role_midraid_raw) if role_midraid_raw else None
@@ -54,6 +56,7 @@ ROLE_DL_ID = int(role_dl_raw) if role_dl_raw else None
 ROLE_FROZEN_ID = int(role_frozen_raw) if role_frozen_raw else None
 ROLE_METEORIC_ID = int(role_meteoric_raw) if role_meteoric_raw else None
 ROLE_WARDEN_ID = int(role_warden_raw) if role_warden_raw else None
+TIMER_MANAGER_ROLE_ID = int(timer_manager_role_raw) if timer_manager_role_raw else None
 
 BOSSES = {
     "croms manikin": {
@@ -123,49 +126,49 @@ BOSSES = {
         "display": "215",
         "group": "EDL",
         "respawn_minutes": 2 * 60 + 14,
-        "window_minutes": 5,
+        "window_minutes": 10,
         "aliases": ["215", "unox"],
     },
     "210": {
         "display": "210",
         "group": "EDL",
         "respawn_minutes": 2 * 60 + 5,
-        "window_minutes": 5,
+        "window_minutes": 10,
         "aliases": ["210"],
     },
     "205": {
         "display": "205",
         "group": "EDL",
         "respawn_minutes": 1 * 60 + 57,
-        "window_minutes": 4,
+        "window_minutes": 9,
         "aliases": ["205"],
     },
     "200": {
         "display": "200",
         "group": "EDL",
         "respawn_minutes": 1 * 60 + 48,
-        "window_minutes": 5,
+        "window_minutes": 10,
         "aliases": ["200"],
     },
     "195": {
         "display": "195",
         "group": "EDL",
         "respawn_minutes": 1 * 60 + 29,
-        "window_minutes": 4,
+        "window_minutes": 9,
         "aliases": ["195"],
     },
     "190": {
         "display": "190",
         "group": "EDL",
         "respawn_minutes": 1 * 60 + 21,
-        "window_minutes": 3,
+        "window_minutes": 8,
         "aliases": ["190"],
     },
     "185": {
         "display": "185",
         "group": "EDL",
         "respawn_minutes": 1 * 60 + 12,
-        "window_minutes": 3,
+        "window_minutes": 8,
         "aliases": ["185"],
     },
     "180": {
@@ -336,6 +339,7 @@ GROUP_ORDER = [
 ]
 
 boss_timers = {}
+timer_history = {}
 display_message_id = None
 pinged_bosses = set()
 active_alert_messages = {}
@@ -432,7 +436,7 @@ def parse_datetime_string(text: str):
 
 
 def load_data():
-    global boss_timers, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data
+    global boss_timers, timer_history, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data
 
     boss_timers = load_json(DATA_FILE, {})
     msg_data = load_json(MESSAGE_ID_FILE, {})
@@ -452,6 +456,7 @@ def load_data():
         event_timer_data["bosses"] = {}
 
     server_reset_data = load_json(SERVER_RESET_FILE, {})
+    timer_history = load_json(TIMER_HISTORY_FILE, {})
 
 
 def save_event():
@@ -476,6 +481,10 @@ def save_display_message_id():
 
 def save_alert_messages():
     save_json(ALERTS_FILE, active_alert_messages)
+
+
+def save_timer_history():
+    save_json(TIMER_HISTORY_FILE, timer_history)
 
 
 def find_boss_key(user_input: str):
@@ -516,7 +525,36 @@ async def clear_all_alert_messages():
         await delete_alert_message_for_boss(boss_key)
 
 
+
+def remember_timer_state(boss_key: str):
+    """Save the current timer value before changing it so it can be restored with undo."""
+    if boss_key not in BOSSES:
+        return
+
+    timer_history[boss_key] = boss_timers.get(boss_key)
+    save_timer_history()
+
+
+def restore_previous_timer(boss_key: str) -> bool:
+    """Restore the most recent saved timer state for one boss."""
+    if boss_key not in timer_history:
+        return False
+
+    previous_value = timer_history.pop(boss_key, None)
+
+    if previous_value is None:
+        boss_timers.pop(boss_key, None)
+    else:
+        boss_timers[boss_key] = previous_value
+
+    pinged_bosses.discard(boss_key)
+    save_timers()
+    save_timer_history()
+    return True
+
+
 def set_boss_timer_now(boss_key: str):
+    remember_timer_state(boss_key)
     kill_time = now_utc()
     boss_timers[boss_key] = kill_time.isoformat()
     pinged_bosses.discard(boss_key)
@@ -525,6 +563,7 @@ def set_boss_timer_now(boss_key: str):
 
 
 def set_boss_timer_from_open(boss_key: str, open_minutes: int):
+    remember_timer_state(boss_key)
     boss = BOSSES[boss_key]
     open_time = now_utc() + timedelta(minutes=open_minutes)
     kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
@@ -632,6 +671,7 @@ def get_event_timer_minutes(boss_key: str):
 
 
 def set_boss_timer_from_event(boss_key: str, event_minutes: int):
+    remember_timer_state(boss_key)
     boss = BOSSES[boss_key]
     open_time = now_utc() + timedelta(minutes=event_minutes)
     kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
@@ -951,6 +991,35 @@ async def on_message(message: discord.Message):
 
     content = message.content.strip().lower()
 
+    # ↩️ Word-detected undo shortcut, example: undo dhio / undo bt / undo prot
+    if content.startswith("undo "):
+        boss_name = content[5:].strip()
+        boss_key = find_boss_key(boss_name)
+
+        if not boss_key:
+            await message.channel.send("Boss not found.")
+            return
+
+        restored = restore_previous_timer(boss_key)
+
+        if not restored:
+            await message.channel.send(
+                f"No undo available for **{BOSSES[boss_key]['display']}**."
+            )
+            return
+
+        await delete_alert_message_for_boss(boss_key)
+
+        try:
+            await update_display_board()
+        except Exception as e:
+            print(f"Board update after undo failed: {e}")
+
+        await message.channel.send(
+            f"↩️ Undid last timer change for **{BOSSES[boss_key]['display']}**."
+        )
+        return
+
     # 🟢 Server back up shortcut
     if content == "up":
         server_reset_data = {}
@@ -1064,9 +1133,100 @@ def in_command_or_display_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id in [COMMAND_CHANNEL_ID, DISPLAY_CHANNEL_ID]
 
 
+
+def user_can_manage_timers(interaction: discord.Interaction) -> bool:
+    """Allow timer-management actions for admins, server managers, or the Railway-configured role."""
+    user = interaction.user
+    permissions = getattr(user, "guild_permissions", None)
+
+    if permissions and (permissions.administrator or permissions.manage_guild):
+        return True
+
+    if TIMER_MANAGER_ROLE_ID is None:
+        return False
+
+    return any(role.id == TIMER_MANAGER_ROLE_ID for role in getattr(user, "roles", []))
+
+
+async def deny_missing_timer_permission(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "You do not have permission to manage timer settings.",
+        ephemeral=True,
+    )
+
+
 def get_bosses_in_group(group_name: str):
     normalized = group_name.strip().upper()
     return [key for key, boss in BOSSES.items() if boss["group"] == normalized]
+
+
+
+class ConfirmWipeView(discord.ui.View):
+    def __init__(self, requester_id: int):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who used `/wipe` can confirm this.",
+                ephemeral=True,
+            )
+            return False
+
+        if not user_can_manage_timers(interaction):
+            await interaction.response.send_message(
+                "You do not have permission to wipe timers.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
+    @discord.ui.button(label="Confirm Wipe", style=discord.ButtonStyle.danger)
+    async def confirm_wipe(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        global boss_timers, pinged_bosses
+
+        user = interaction.user
+
+        for boss_key in list(boss_timers.keys()):
+            remember_timer_state(boss_key)
+
+        boss_timers = {}
+        pinged_bosses = set()
+        save_timers()
+        await clear_all_alert_messages()
+
+        try:
+            await update_display_board()
+        except Exception as e:
+            print(f"Board update after wipe failed: {e}")
+
+        await interaction.response.edit_message(
+            content="✅ All boss timers have been reset.",
+            view=None,
+        )
+
+        channel = bot.get_channel(COMMAND_CHANNEL_ID)
+        if channel is None:
+            channel = await bot.fetch_channel(COMMAND_CHANNEL_ID)
+
+        await channel.send(f"⚠️ **Boss timers wiped by {user.mention}**")
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_wipe(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            content="Wipe cancelled.",
+            view=None,
+        )
 
 
 @bot.tree.command(
@@ -1087,6 +1247,10 @@ async def clear_section(interaction: discord.Interaction, section: str):
         )
         return
 
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
+        return
+
     section_name = section.strip().upper()
 
     if section_name not in GROUP_ORDER:
@@ -1101,6 +1265,7 @@ async def clear_section(interaction: discord.Interaction, section: str):
 
     for boss_key in bosses_to_clear:
         if boss_key in boss_timers:
+            remember_timer_state(boss_key)
             del boss_timers[boss_key]
             cleared_any = True
 
@@ -1132,37 +1297,22 @@ async def clear_section(interaction: discord.Interaction, section: str):
     guild=discord.Object(id=GUILD_ID),
 )
 async def wipe(interaction: discord.Interaction):
-    global boss_timers, pinged_bosses
-
     if not in_command_channel(interaction):
         await interaction.response.send_message(
-            "Use this command in the command or display channel.",
+            "Use this command in the configured command channel.",
             ephemeral=True,
         )
         return
 
-    user = interaction.user
-
-    boss_timers = {}
-    pinged_bosses = set()
-    save_timers()
-    await clear_all_alert_messages()
-
-    try:
-        await update_display_board()
-    except Exception as e:
-        print(f"Board update after wipe failed: {e}")
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
+        return
 
     await interaction.response.send_message(
-        "All boss timers have been reset.",
+        "⚠️ This will clear **all boss timers**. Are you sure?",
+        view=ConfirmWipeView(interaction.user.id),
         ephemeral=True,
     )
-
-    channel = bot.get_channel(COMMAND_CHANNEL_ID)
-    if channel is None:
-        channel = await bot.fetch_channel(COMMAND_CHANNEL_ID)
-
-    await channel.send(f"⚠️ **Boss timers wiped by {user.mention}**")
 
 
 @bot.tree.command(
@@ -1181,6 +1331,10 @@ async def reset_boss(interaction: discord.Interaction, boss: str):
         )
         return
 
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
+        return
+
     boss_key = find_boss_key(boss)
     if not boss_key:
         await interaction.response.send_message(
@@ -1196,6 +1350,7 @@ async def reset_boss(interaction: discord.Interaction, boss: str):
         )
         return
 
+    remember_timer_state(boss_key)
     del boss_timers[boss_key]
     pinged_bosses.discard(boss_key)
     save_timers()
@@ -1314,12 +1469,123 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str = Non
     )
 
 
+
 @bot.tree.command(
-    name="info",
+    name="next",
+    description="Show the next 5 bosses opening",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def next_bosses(interaction: discord.Interaction):
+    current = now_utc()
+    upcoming = []
+
+    for boss_key in boss_timers:
+        if boss_key not in BOSSES:
+            continue
+
+        open_time, close_time = get_open_close_times(boss_key)
+
+        # Skip timers whose windows are already completely over.
+        if current > close_time:
+            continue
+
+        upcoming.append((open_time, close_time, boss_key))
+
+    upcoming.sort(key=lambda item: item[0])
+
+    if not upcoming:
+        await interaction.response.send_message(
+            "No active or upcoming boss timers.",
+            ephemeral=False,
+        )
+        return
+
+    embed = discord.Embed(
+        title="⏭️ Next Bosses",
+        color=discord.Color.teal(),
+    )
+
+    lines = []
+
+    for open_time, close_time, boss_key in upcoming[:5]:
+        boss_name = BOSSES[boss_key]["display"]
+        unix_open = int(open_time.timestamp())
+        unix_close = int(close_time.timestamp())
+
+        if open_time <= current <= close_time:
+            lines.append(
+                f"🔥 **{boss_name}** — OPEN NOW • closes <t:{unix_close}:R>"
+            )
+        else:
+            lines.append(
+                f"⏳ **{boss_name}** — opens <t:{unix_open}:R>"
+            )
+
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"Game Time: {now_utc().strftime('%H:%M UTC')}")
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=False,
+    )
+
+
+@bot.tree.command(
+    name="due",
+    description="Show bosses currently open",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def due_bosses(interaction: discord.Interaction):
+    current = now_utc()
+    due = []
+
+    for boss_key in boss_timers:
+        if boss_key not in BOSSES:
+            continue
+
+        open_time, close_time = get_open_close_times(boss_key)
+
+        if open_time <= current <= close_time:
+            due.append((close_time, boss_key))
+
+    due.sort(key=lambda item: item[0])
+
+    if not due:
+        await interaction.response.send_message(
+            "No bosses are open right now.",
+            ephemeral=False,
+        )
+        return
+
+    embed = discord.Embed(
+        title="🔥 Currently Open",
+        color=discord.Color.red(),
+    )
+
+    lines = []
+
+    for close_time, boss_key in due:
+        boss_name = BOSSES[boss_key]["display"]
+        unix_close = int(close_time.timestamp())
+        lines.append(
+            f"**{boss_name}** — closes <t:{unix_close}:R>"
+        )
+
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"Game Time: {now_utc().strftime('%H:%M UTC')}")
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=False,
+    )
+
+
+@bot.tree.command(
+    name="timers",
     description="DM yourself the current boss timers",
     guild=discord.Object(id=GUILD_ID),
 )
-async def info(interaction: discord.Interaction):
+async def timers(interaction: discord.Interaction):
     if not in_command_channel(interaction):
         await interaction.response.send_message(
             "Use this command in the configured command channel.",
@@ -1351,13 +1617,6 @@ async def info(interaction: discord.Interaction):
     boss="Boss name or alias",
 )
 async def when(interaction: discord.Interaction, boss: str):
-    if not in_command_or_display_channel(interaction):
-        await interaction.response.send_message(
-            "Use this command in the configured command channel.",
-            ephemeral=True,
-        )
-        return
-
     boss_key = find_boss_key(boss)
     if not boss_key:
         await interaction.response.send_message(
@@ -1428,6 +1687,10 @@ async def event_message(interaction: discord.Interaction, text: str):
         )
         return
 
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
+        return
+
     current_event_text = text
     save_event()
 
@@ -1458,6 +1721,10 @@ async def event_start(interaction: discord.Interaction, timers: str):
             "Use this command in the configured command channel.",
             ephemeral=True,
         )
+        return
+
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
         return
 
     try:
@@ -1498,6 +1765,10 @@ async def event_stop(interaction: discord.Interaction):
         )
         return
 
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
+        return
+
     event_timer_data = {"active": False, "bosses": {}}
     save_event_timers()
 
@@ -1520,6 +1791,10 @@ async def event_clear(interaction: discord.Interaction):
             "Use this command in the configured command channel.",
             ephemeral=True,
         )
+        return
+
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
         return
 
     current_event_text = None
@@ -1553,6 +1828,10 @@ async def server_set(interaction: discord.Interaction, when: str, downtime: str 
             "Use this command in the configured command channel.",
             ephemeral=True,
         )
+        return
+
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
         return
 
     try:
@@ -1642,6 +1921,10 @@ async def server_clear(interaction: discord.Interaction):
             "Use this command in the configured command channel.",
             ephemeral=True,
         )
+        return
+
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
         return
 
     server_reset_data = {}
@@ -1797,7 +2080,7 @@ async def help_command(interaction: discord.Interaction):
         name="Info",
         value=(
             "`/when boss:[name]` → shows your local time\n\n"
-            "`/info` → DM full timer list"
+            "`/timers` → DM full timer list"
         ),
         inline=False,
     )
@@ -1840,11 +2123,11 @@ async def help_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="bosswindows",
+    name="windows",
     description="Show boss open and close windows",
     guild=discord.Object(id=GUILD_ID),
 )
-async def bosswindows(interaction: discord.Interaction):
+async def windows(interaction: discord.Interaction):
     embed = discord.Embed(title="Boss Windows", color=0x00D4AA)
 
     embed.description = f"**View Active Boss times here:**\n" f"<#{DISPLAY_CHANNEL_ID}>"
