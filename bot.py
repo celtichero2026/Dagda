@@ -48,6 +48,26 @@ role_meteoric_raw = os.getenv("ROLE_METEORIC_ID")
 role_warden_raw = os.getenv("ROLE_WARDEN_ID")
 timer_manager_role_raw = os.getenv("TIMER_MANAGER_ROLE_ID")
 
+
+def parse_role_id_list(raw: str):
+    if not raw:
+        return set()
+
+    role_ids = set()
+
+    for part in raw.split(","):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+
+        try:
+            role_ids.add(int(cleaned))
+        except ValueError:
+            print(f"Invalid role ID in TIMER_MANAGER_ROLE_ID: {cleaned}")
+
+    return role_ids
+
+
 ROLE_ENDGAME_ID = int(role_endgame_raw) if role_endgame_raw else None
 ROLE_MIDRAID_ID = int(role_midraid_raw) if role_midraid_raw else None
 ROLE_215_ID = int(role_215_raw) if role_215_raw else None
@@ -56,7 +76,7 @@ ROLE_DL_ID = int(role_dl_raw) if role_dl_raw else None
 ROLE_FROZEN_ID = int(role_frozen_raw) if role_frozen_raw else None
 ROLE_METEORIC_ID = int(role_meteoric_raw) if role_meteoric_raw else None
 ROLE_WARDEN_ID = int(role_warden_raw) if role_warden_raw else None
-TIMER_MANAGER_ROLE_ID = int(timer_manager_role_raw) if timer_manager_role_raw else None
+TIMER_MANAGER_ROLE_IDS = parse_role_id_list(timer_manager_role_raw)
 
 BOSSES = {
     "croms manikin": {
@@ -1142,10 +1162,10 @@ def user_can_manage_timers(interaction: discord.Interaction) -> bool:
     if permissions and (permissions.administrator or permissions.manage_guild):
         return True
 
-    if TIMER_MANAGER_ROLE_ID is None:
+    if not TIMER_MANAGER_ROLE_IDS:
         return False
 
-    return any(role.id == TIMER_MANAGER_ROLE_ID for role in getattr(user, "roles", []))
+    return any(role.id in TIMER_MANAGER_ROLE_IDS for role in getattr(user, "roles", []))
 
 
 async def deny_missing_timer_permission(interaction: discord.Interaction):
@@ -1312,6 +1332,64 @@ async def wipe(interaction: discord.Interaction):
         "⚠️ This will clear **all boss timers**. Are you sure?",
         view=ConfirmWipeView(interaction.user.id),
         ephemeral=True,
+    )
+
+
+
+@bot.tree.command(
+    name="purge",
+    description="Remove all expired boss timers",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def purge_expired(interaction: discord.Interaction):
+    global boss_timers, pinged_bosses
+
+    if not in_command_channel(interaction):
+        await interaction.response.send_message(
+            "Use this command in the configured command channel.",
+            ephemeral=True,
+        )
+        return
+
+    if not user_can_manage_timers(interaction):
+        await deny_missing_timer_permission(interaction)
+        return
+
+    current = now_utc()
+    expired_bosses = []
+
+    for boss_key in list(boss_timers.keys()):
+        if boss_key not in BOSSES:
+            continue
+
+        open_time, close_time = get_open_close_times(boss_key)
+
+        if current > close_time:
+            remember_timer_state(boss_key)
+            boss_timers.pop(boss_key, None)
+            pinged_bosses.discard(boss_key)
+            expired_bosses.append(BOSSES[boss_key]["display"])
+            await delete_alert_message_for_boss(boss_key)
+
+    save_timers()
+
+    try:
+        await update_display_board()
+    except Exception as e:
+        print(f"Board update after purge failed: {e}")
+
+    if not expired_bosses:
+        await interaction.response.send_message(
+            "No expired timers to purge.",
+            ephemeral=False,
+        )
+        return
+
+    expired_list = ", ".join(expired_bosses)
+
+    await interaction.response.send_message(
+        f"🧹 Purged **{len(expired_bosses)}** expired timer(s): {expired_list}",
+        ephemeral=False,
     )
 
 
