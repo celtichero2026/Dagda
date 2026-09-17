@@ -697,7 +697,7 @@ async def check_proteus_special_alerts(current: datetime, open_time: datetime, c
             try:
                 await send_proteus_display_alert(
                     "display_10m",
-                    "Proteus opens in under 10 minutes — park at spawn location.",
+                    "Proteus opens in under 10 minutes — park in Arcane Sanctum‼️.",
                 )
                 pinged_bosses.add("proteus")
             except Exception as e:
