@@ -11,6 +11,9 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 display_channel_raw = os.getenv("DISPLAY_CHANNEL_ID")
 command_channel_raw = os.getenv("COMMAND_CHANNEL_ID")
 guild_id_raw = os.getenv("GUILD_ID")
+proteus_alerts_enabled_raw = os.getenv("PROTEUS_ALERTS_ENABLED", "false")
+boss_call_channel_raw = os.getenv("BOSS_CALL_CHANNEL_ID")
+role_endgame2_raw = os.getenv("ROLE_ENDGAME2_ID")
 
 if not TOKEN:
     raise ValueError("Missing DISCORD_TOKEN environment variable")
@@ -24,6 +27,14 @@ if not guild_id_raw:
 DISPLAY_CHANNEL_ID = int(display_channel_raw)
 COMMAND_CHANNEL_ID = int(command_channel_raw)
 GUILD_ID = int(guild_id_raw)
+PROTEUS_ALERTS_ENABLED = proteus_alerts_enabled_raw.strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+BOSS_CALL_CHANNEL_ID = int(boss_call_channel_raw) if boss_call_channel_raw else None
+ROLE_ENDGAME2_ID = int(role_endgame2_raw) if role_endgame2_raw else None
 
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
@@ -41,6 +52,7 @@ EVENT_FILE = data_path("current_event.json")
 EVENT_TIMER_FILE = data_path("event_timers.json")
 SERVER_RESET_FILE = data_path("server_reset.json")
 TIMER_HISTORY_FILE = data_path("timer_history.json")
+PROTEUS_ALERT_STATE_FILE = data_path("proteus_alert_state.json")
 
 
 
@@ -54,6 +66,7 @@ def migrate_legacy_data_files():
         "event_timers.json",
         "server_reset.json",
         "timer_history.json",
+        "proteus_alert_state.json",
     ]
 
     for filename in filenames:
@@ -115,6 +128,21 @@ ROLE_FROZEN_ID = int(role_frozen_raw) if role_frozen_raw else None
 ROLE_METEORIC_ID = int(role_meteoric_raw) if role_meteoric_raw else None
 ROLE_WARDEN_ID = int(role_warden_raw) if role_warden_raw else None
 TIMER_MANAGER_ROLE_IDS = parse_role_id_list(timer_manager_role_raw)
+
+if PROTEUS_ALERTS_ENABLED:
+    missing_proteus_variables = []
+    if not ROLE_ENDGAME_ID:
+        missing_proteus_variables.append("ROLE_ENDGAME_ID")
+    if not BOSS_CALL_CHANNEL_ID:
+        missing_proteus_variables.append("BOSS_CALL_CHANNEL_ID")
+    if not ROLE_ENDGAME2_ID:
+        missing_proteus_variables.append("ROLE_ENDGAME2_ID")
+
+    if missing_proteus_variables:
+        raise ValueError(
+            "PROTEUS_ALERTS_ENABLED=true requires: "
+            + ", ".join(missing_proteus_variables)
+        )
 
 BOSSES = {
     "croms manikin": {
@@ -399,11 +427,11 @@ GROUP_ORDER = [
 boss_timers = {}
 timer_history = {}
 display_message_id = None
-pinged_bosses = set()
 active_alert_messages = {}
 current_event_text = None
 event_timer_data = {"active": False, "bosses": {}}
 server_reset_data = {}
+proteus_alert_state = {"timer_value": None, "sent_stages": []}
 
 
 def get_ping_role_id(boss_key: str):
@@ -497,7 +525,7 @@ def parse_datetime_string(text: str):
 
 
 def load_data():
-    global boss_timers, timer_history, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data
+    global boss_timers, timer_history, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data, proteus_alert_state
 
     boss_timers = load_json(DATA_FILE, {})
     msg_data = load_json(MESSAGE_ID_FILE, {})
@@ -518,6 +546,17 @@ def load_data():
 
     server_reset_data = load_json(SERVER_RESET_FILE, {})
     timer_history = load_json(TIMER_HISTORY_FILE, {})
+
+    proteus_alert_state = load_json(
+        PROTEUS_ALERT_STATE_FILE,
+        {"timer_value": None, "sent_stages": []},
+    )
+    if not isinstance(proteus_alert_state, dict):
+        proteus_alert_state = {"timer_value": None, "sent_stages": []}
+    if not isinstance(proteus_alert_state.get("sent_stages"), list):
+        proteus_alert_state["sent_stages"] = []
+    if "timer_value" not in proteus_alert_state:
+        proteus_alert_state["timer_value"] = None
 
 
 def save_event():
@@ -546,6 +585,24 @@ def save_alert_messages():
 
 def save_timer_history():
     save_json(TIMER_HISTORY_FILE, timer_history)
+
+
+def save_proteus_alert_state():
+    save_json(PROTEUS_ALERT_STATE_FILE, proteus_alert_state)
+
+
+def reset_proteus_alert_state_for_timer(boss_key: str):
+    """Start a fresh Proteus alert sequence after its timer changes."""
+    global proteus_alert_state
+
+    if boss_key != "proteus":
+        return
+
+    proteus_alert_state = {
+        "timer_value": boss_timers.get("proteus"),
+        "sent_stages": [],
+    }
+    save_proteus_alert_state()
 
 
 def find_boss_key(user_input: str):
@@ -608,7 +665,7 @@ def restore_previous_timer(boss_key: str) -> bool:
     else:
         boss_timers[boss_key] = previous_value
 
-    pinged_bosses.discard(boss_key)
+    reset_proteus_alert_state_for_timer(boss_key)
     save_timers()
     save_timer_history()
     return True
@@ -618,7 +675,7 @@ def set_boss_timer_now(boss_key: str):
     remember_timer_state(boss_key)
     kill_time = now_utc()
     boss_timers[boss_key] = kill_time.isoformat()
-    pinged_bosses.discard(boss_key)
+    reset_proteus_alert_state_for_timer(boss_key)
     save_timers()
     return kill_time
 
@@ -629,7 +686,7 @@ def set_boss_timer_from_open(boss_key: str, open_minutes: int):
     open_time = now_utc() + timedelta(minutes=open_minutes)
     kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
     boss_timers[boss_key] = kill_time.isoformat()
-    pinged_bosses.discard(boss_key)
+    reset_proteus_alert_state_for_timer(boss_key)
     save_timers()
     return kill_time
 
@@ -737,7 +794,7 @@ def set_boss_timer_from_event(boss_key: str, event_minutes: int):
     open_time = now_utc() + timedelta(minutes=event_minutes)
     kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
     boss_timers[boss_key] = kill_time.isoformat()
-    pinged_bosses.discard(boss_key)
+    reset_proteus_alert_state_for_timer(boss_key)
     save_timers()
     return kill_time
 
@@ -939,6 +996,101 @@ async def update_display_board():
     print(f"Created new display message: {display_message_id}")
 
 
+def sync_proteus_alert_cycle():
+    """Reset sent stages whenever Proteus receives a new timer."""
+    global proteus_alert_state
+
+    timer_value = boss_timers.get("proteus")
+    if proteus_alert_state.get("timer_value") == timer_value:
+        return
+
+    proteus_alert_state = {
+        "timer_value": timer_value,
+        "sent_stages": [],
+    }
+    save_proteus_alert_state()
+
+
+def proteus_stage_was_sent(stage: str) -> bool:
+    return stage in proteus_alert_state.get("sent_stages", [])
+
+
+def mark_proteus_stage_sent(stage: str):
+    sent_stages = proteus_alert_state.setdefault("sent_stages", [])
+    if stage not in sent_stages:
+        sent_stages.append(stage)
+        save_proteus_alert_state()
+
+
+async def replace_proteus_display_alert(channel, message_text: str):
+    """Replace the previous Proteus display alert with the newest one."""
+    await delete_alert_message_for_boss("proteus")
+    msg = await channel.send(message_text)
+    active_alert_messages["proteus"] = msg.id
+    save_alert_messages()
+    print(f"Created Proteus display alert: {msg.id}")
+
+
+async def send_proteus_alerts(channel, current, open_time, close_time):
+    """Send the optional 10-minute, 5-minute, and due Proteus alert sequence."""
+    sync_proteus_alert_cycle()
+
+    seconds_until_open = (open_time - current).total_seconds()
+    endgame_mention = f"<@&{ROLE_ENDGAME_ID}>"
+
+    # A 90-second trigger window tolerates normal loop drift without sending
+    # an outdated warning after a longer outage.
+    if 510 < seconds_until_open <= 600 and not proteus_stage_was_sent("10m"):
+        try:
+            await replace_proteus_display_alert(
+                channel,
+                f"{endgame_mention} 🅿️ Proteus due in 10 minutes — "
+                "park at spawn location.",
+            )
+            mark_proteus_stage_sent("10m")
+        except Exception as e:
+            print(f"Failed creating Proteus 10-minute alert: {e}")
+        return
+
+    if 210 < seconds_until_open <= 300 and not proteus_stage_was_sent("5m"):
+        try:
+            await replace_proteus_display_alert(
+                channel,
+                f"{endgame_mention} ⚔️ Proteus due in 5 minutes — "
+                "log and form groups.",
+            )
+            mark_proteus_stage_sent("5m")
+        except Exception as e:
+            print(f"Failed creating Proteus 5-minute alert: {e}")
+        return
+
+    if open_time <= current <= close_time:
+        if not proteus_stage_was_sent("due_display"):
+            try:
+                await replace_proteus_display_alert(
+                    channel,
+                    f"{endgame_mention} 🚨 Proteus is due — last call, log now. 🚨",
+                )
+                mark_proteus_stage_sent("due_display")
+            except Exception as e:
+                print(f"Failed creating Proteus due alert: {e}")
+
+        if not proteus_stage_was_sent("due_boss_call"):
+            try:
+                boss_call_channel = bot.get_channel(BOSS_CALL_CHANNEL_ID)
+                if boss_call_channel is None:
+                    boss_call_channel = await bot.fetch_channel(BOSS_CALL_CHANNEL_ID)
+
+                await boss_call_channel.send(
+                    f"<@&{ROLE_ENDGAME2_ID}> 🚨 Proteus is due — "
+                    "last call, log now. 🚨"
+                )
+                mark_proteus_stage_sent("due_boss_call")
+                print("Created Proteus boss-call alert")
+            except Exception as e:
+                print(f"Failed creating Proteus boss-call alert: {e}")
+
+
 async def check_due_boss_pings():
     channel = bot.get_channel(DISPLAY_CHANNEL_ID)
     if channel is None:
@@ -956,7 +1108,10 @@ async def check_due_boss_pings():
         # delete lingering alert after window ends
         if current > close_time and boss_key in active_alert_messages:
             await delete_alert_message_for_boss(boss_key)
-            pinged_bosses.discard(boss_key)
+            continue
+
+        if boss_key == "proteus" and PROTEUS_ALERTS_ENABLED:
+            await send_proteus_alerts(channel, current, open_time, close_time)
             continue
 
         # create 3-minute-before alert and leave it through the window
@@ -972,7 +1127,6 @@ async def check_due_boss_pings():
                 msg = await channel.send(message_text)
                 active_alert_messages[boss_key] = msg.id
                 save_alert_messages()
-                pinged_bosses.add(boss_key)
                 print(f"Created alert message for {boss_key}: {msg.id}")
             except Exception as e:
                 print(f"Failed creating alert for {boss_key}: {e}")
@@ -1250,7 +1404,7 @@ class ConfirmWipeView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        global boss_timers, pinged_bosses
+        global boss_timers
 
         user = interaction.user
 
@@ -1258,7 +1412,6 @@ class ConfirmWipeView(discord.ui.View):
             remember_timer_state(boss_key)
 
         boss_timers = {}
-        pinged_bosses = set()
         save_timers()
         await clear_all_alert_messages()
 
@@ -1299,7 +1452,7 @@ class ConfirmWipeView(discord.ui.View):
     section="Boss section: endgame, midraid, edl, dl, frozen, meteoric, warden, ring",
 )
 async def clear_section(interaction: discord.Interaction, section: str):
-    global boss_timers, pinged_bosses
+    global boss_timers
 
     if not in_command_channel(interaction):
         await interaction.response.send_message(
@@ -1330,7 +1483,6 @@ async def clear_section(interaction: discord.Interaction, section: str):
             del boss_timers[boss_key]
             cleared_any = True
 
-        pinged_bosses.discard(boss_key)
         await delete_alert_message_for_boss(boss_key)
 
     save_timers()
@@ -1383,7 +1535,7 @@ async def wipe(interaction: discord.Interaction):
     guild=discord.Object(id=GUILD_ID),
 )
 async def purge_expired(interaction: discord.Interaction):
-    global boss_timers, pinged_bosses
+    global boss_timers
 
     if not in_command_channel(interaction):
         await interaction.response.send_message(
@@ -1408,7 +1560,6 @@ async def purge_expired(interaction: discord.Interaction):
         if current > close_time:
             remember_timer_state(boss_key)
             boss_timers.pop(boss_key, None)
-            pinged_bosses.discard(boss_key)
             expired_bosses.append(BOSSES[boss_key]["display"])
             await delete_alert_message_for_boss(boss_key)
 
@@ -1471,7 +1622,6 @@ async def reset_boss(interaction: discord.Interaction, boss: str):
 
     remember_timer_state(boss_key)
     del boss_timers[boss_key]
-    pinged_bosses.discard(boss_key)
     save_timers()
     await delete_alert_message_for_boss(boss_key)
 
@@ -2180,26 +2330,43 @@ async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="⚔️ TIMER BOT COMMANDS", color=0x00D4AA)
 
     embed.description = (
-        f"**Post commands here:** <#{COMMAND_CHANNEL_ID}>\n\n"
-        f"Enter boss name in channel to set boss"
+        f"**Post timer commands here:** <#{COMMAND_CHANNEL_ID}>\n"
+        f"**View the live board here:** <#{DISPLAY_CHANNEL_ID}>\n\n"
+        "Most bosses send one due ping about 3 minutes before opening. "
+        "When enabled, Proteus instead sends 10-minute, 5-minute, and due alerts."
     )
 
     embed.add_field(
-        name="Boss Timers",
+        name="Quick Timer Entry",
         value=(
-            "`/set boss:[name] open:[time]` → set timer\n\n"
-            "`/reset boss:[name]` → remove one timer\n\n"
-            "`/clear section:[group]` → clear a section\n\n"
-            "`/wipe` → ⚠️ clear ALL timers"
+            "`dhio` → set the normal timer\n"
+            "`dhio 19h` → set it to open in 19 hours\n"
+            "`dhio -2h` → normal/event timer minus 2 hours\n"
+            "`undo dhio` → undo its last timer change"
         ),
         inline=False,
     )
 
     embed.add_field(
-        name="Info",
+        name="View Timers",
         value=(
-            "`/when boss:[name]` → shows your local time\n\n"
-            "`/timers` → DM full timer list"
+            "`/next` → next 5 bosses opening\n"
+            "`/due` → bosses currently open\n"
+            "`/when boss:[name]` → local open/close time\n"
+            "`/timers` → DM the full timer list\n"
+            "`/windows` → normal spawn windows"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Set and Clear Timers",
+        value=(
+            "`/set boss:[name] open:[optional time]` → set a timer\n"
+            "`/reset boss:[name]` → remove one timer\n"
+            "`/clear section:[group]` → clear one section\n"
+            "`/purge` → remove expired timers\n"
+            "`/wipe` → ⚠️ clear every timer"
         ),
         inline=False,
     )
@@ -2207,9 +2374,9 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="Event",
         value=(
-            "`/eventmessage text:[message]` → set event banner\n\n"
-            "`/eventclear` → remove event banner\n\n"
-            "`/eventstart timers:[dhio 20h bt 20h]` → start respawn event mode\n\n"
+            "`/eventmessage text:[message]` → set event banner\n"
+            "`/eventclear` → remove event banner\n"
+            "`/eventstart timers:[dhio 20h bt 20h]` → start event timers\n"
             "`/eventstop` → stop respawn event mode"
         ),
         inline=False,
@@ -2218,9 +2385,19 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="Server Reset",
         value=(
-            "`/serverset when:[MM/DD/YYYY HHMM] downtime:[optional]`\n\n"
-            "`/serverwhen` → view reset\n\n"
-            "`/serverclear` → remove reset"
+            "`/serverset when:[date/time] downtime:[optional]` → set reset\n"
+            "`/serverwhen` → view reset\n"
+            "`/serverclear` → remove reset\n"
+            "`up` → mark the server back up"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Timer Recovery",
+        value=(
+            "`/since from_time:[UTC] timers:[boss/time pairs]` → update timer "
+            "values copied from an older board"
         ),
         inline=False,
     )
@@ -2236,7 +2413,7 @@ async def help_command(interaction: discord.Interaction):
         inline=False,
     )
 
-    embed.set_footer(text="Use /when to check your local boss times")
+    embed.set_footer(text="Times such as 30m, 2h, and 1d2h30m are supported")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -2249,89 +2426,29 @@ async def help_command(interaction: discord.Interaction):
 async def windows(interaction: discord.Interaction):
     embed = discord.Embed(title="Boss Windows", color=0x00D4AA)
 
-    embed.description = f"**View Active Boss times here:**\n" f"<#{DISPLAY_CHANNEL_ID}>"
+    embed.description = f"**View active boss times here:**\n<#{DISPLAY_CHANNEL_ID}>"
 
-    embed.add_field(
-        name="ENDGAME",
-        value=(
-            "Crom's Manikin — Open: 96h | Close: 120h\n"
-            "Dhiothu — Open: 34h | Close: 62h\n"
-            "Bloodthorn — Open: 34h | Close: 62h\n"
-            "Gelebron — Open: 32h | Close: 60h\n"
-            "Proteus — Open: 18h | Close: 18h 15m"
-        ),
-        inline=False,
-    )
+    for group in GROUP_ORDER:
+        lines = []
 
-    embed.add_field(
-        name="MIDRAID",
-        value=(
-            "Necromancer — Open: 22h | Close: 38h\n"
-            "Mordris — Open: 20h | Close: 36h\n"
-            "Hrungnir — Open: 22h | Close: 38h\n"
-            "Aggragoth — Open: 20h | Close: 36h"
-        ),
-        inline=False,
-    )
+        for boss in BOSSES.values():
+            if boss["group"] != group:
+                continue
 
-    embed.add_field(
-        name="EDL",
-        value=(
-            "215 — Open: 2h 14m | Close: 2h 19m\n"
-            "210 — Open: 2h 5m | Close: 2h 10m\n"
-            "205 — Open: 1h 57m | Close: 2h 1m\n"
-            "200 — Open: 1h 48m | Close: 1h 53m\n"
-            "195 — Open: 1h 29m | Close: 1h 33m\n"
-            "190 — Open: 1h 21m | Close: 1h 24m\n"
-            "185 — Open: 1h 12m | Close: 1h 15m"
-        ),
-        inline=False,
-    )
+            open_minutes = boss["respawn_minutes"]
+            close_minutes = open_minutes + boss["window_minutes"]
+            lines.append(
+                f"{boss['display']} — Open: {format_event_timer(open_minutes)} | "
+                f"Close: {format_event_timer(close_minutes)}"
+            )
 
-    embed.add_field(
-        name="DL",
-        value=(
-            "180 — Open: 1h 28m | Close: 1h 31m\n"
-            "170 — Open: 1h 18m | Close: 1h 21m\n"
-            "165 — Open: 1h 13m | Close: 1h 16m\n"
-            "160 — Open: 1h 8m | Close: 1h 11m\n"
-            "155 — Open: 1h 3m | Close: 1h 6m"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="FROZEN",
-        value=(
-            "Pyrus — Open: 58m | Close: 1h 1m\n"
-            "Grom — Open: 48m | Close: 51m\n"
-            "Chained — Open: 43m | Close: 46m\n"
-            "Woody — Open: 38m | Close: 41m\n"
-            "Swampie — Open: 33m | Close: 36m\n"
-            "Eye — Open: 28m | Close: 31m\n"
-            "Redbane — Open: 20m | Close: 25m"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="METEORIC / WARDEN",
-        value=(
-            "Coppinger — Open: 20m | Close: 25m\n"
-            "Rockbelly — Open: 15m | Close: 20m\n"
-            "Goretusk — Open: 20m | Close: 25m\n"
-            "Bonehead — Open: 15m | Close: 20m\n"
-            "Doomclaw — Open: 7m | Close: 12m\n\n"
-            "Falgren — Open: 45m | Close: 50m"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="RINGS",
-        value="North / Center / South / East — Open: 3h 35m | Close: 4h 25m",
-        inline=False,
-    )
+        if lines:
+            field_name = "RINGS" if group == "RING" else group
+            embed.add_field(
+                name=field_name,
+                value="\n".join(lines),
+                inline=False,
+            )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
