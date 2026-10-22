@@ -1,5 +1,8 @@
 import os
 import json
+import re
+import uuid
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -39,6 +42,9 @@ MESSAGE_ID_FILE = data_path("display_message.json")
 ALERTS_FILE = data_path("boss_alerts.json")
 EVENT_FILE = data_path("current_event.json")
 EVENT_TIMER_FILE = data_path("event_timers.json")
+EVENT_SCHEDULE_FILE = data_path("event_schedule.json")
+TIMER_WINDOWS_FILE = data_path("timer_windows.json")
+EVENT_TIMEZONE = ZoneInfo(os.getenv("EVENT_TIMEZONE", "America/New_York"))
 SERVER_RESET_FILE = data_path("server_reset.json")
 TIMER_HISTORY_FILE = data_path("timer_history.json")
 PROTEUS_ALERTS_FILE = data_path("proteus_alerts.json")
@@ -53,6 +59,8 @@ def migrate_legacy_data_files():
         "boss_alerts.json",
         "current_event.json",
         "event_timers.json",
+        "event_schedule.json",
+        "timer_windows.json",
         "server_reset.json",
         "timer_history.json",
         "proteus_alerts.json",
@@ -169,7 +177,7 @@ BOSSES = {
         "group": "ENDGAME",
         "respawn_minutes": 18 * 60,
         "window_minutes": 15,
-        "aliases": ["prot", "base", "prime", "proteus"],
+        "aliases": ["prot", "proto", "base", "prime", "proteus"],
     },
     "necromancer": {
         "display": "Necromancer",
@@ -422,6 +430,8 @@ pinged_bosses = set()
 active_alert_messages = {}
 current_event_text = None
 event_timer_data = {"active": False, "bosses": {}}
+event_schedule = []
+timer_windows = {}  # Per-kill event windows, preserved when event rules change.
 server_reset_data = {}
 proteus_alert_state = {"stages": []}
 
@@ -517,9 +527,10 @@ def parse_datetime_string(text: str):
 
 
 def load_data():
-    global boss_timers, timer_history, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data, proteus_alert_state
+    global boss_timers, timer_history, display_message_id, active_alert_messages, current_event_text, event_timer_data, server_reset_data, proteus_alert_state, event_schedule, timer_windows
 
     boss_timers = load_json(DATA_FILE, {})
+    timer_windows = load_json(TIMER_WINDOWS_FILE, {})
     msg_data = load_json(MESSAGE_ID_FILE, {})
     display_message_id = msg_data.get("message_id")
 
@@ -536,6 +547,11 @@ def load_data():
     ):
         event_timer_data["bosses"] = {}
 
+    event_schedule = load_json(EVENT_SCHEDULE_FILE, [])
+    if not isinstance(event_schedule, list):
+        event_schedule = []
+    # Apply scheduled transitions after loading all timer state.
+
     server_reset_data = load_json(SERVER_RESET_FILE, {})
     timer_history = load_json(TIMER_HISTORY_FILE, {})
 
@@ -544,6 +560,7 @@ def load_data():
         proteus_alert_state = {"stages": []}
     if not isinstance(proteus_alert_state.get("stages"), list):
         proteus_alert_state["stages"] = []
+    apply_due_event_changes()
 
 
 def save_event():
@@ -560,6 +577,7 @@ def save_server_reset():
 
 def save_timers():
     save_json(DATA_FILE, boss_timers)
+    save_json(TIMER_WINDOWS_FILE, timer_windows)
 
 
 def save_display_message_id():
@@ -755,6 +773,7 @@ def restore_previous_timer(boss_key: str) -> bool:
     else:
         boss_timers[boss_key] = previous_value
 
+    timer_windows.pop(boss_key, None)
     pinged_bosses.discard(boss_key)
     save_timers()
     save_timer_history()
@@ -766,6 +785,7 @@ def set_boss_timer_now(boss_key: str):
     reset_proteus_alert_history_if_needed(boss_key)
     kill_time = now_utc()
     boss_timers[boss_key] = kill_time.isoformat()
+    timer_windows.pop(boss_key, None)
     pinged_bosses.discard(boss_key)
     save_timers()
     return kill_time
@@ -778,6 +798,7 @@ def set_boss_timer_from_open(boss_key: str, open_minutes: int):
     open_time = now_utc() + timedelta(minutes=open_minutes)
     kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
     boss_timers[boss_key] = kill_time.isoformat()
+    timer_windows.pop(boss_key, None)
     pinged_bosses.discard(boss_key)
     save_timers()
     return kill_time
@@ -786,8 +807,13 @@ def set_boss_timer_from_open(boss_key: str, open_minutes: int):
 def get_open_close_times(boss_key: str):
     kill_time = datetime.fromisoformat(boss_timers[boss_key])
     boss = BOSSES[boss_key]
-    open_time = kill_time + timedelta(minutes=boss["respawn_minutes"])
-    close_time = open_time + timedelta(minutes=boss["window_minutes"])
+    window = timer_windows.get(boss_key)
+    if window:
+        open_time = kill_time + timedelta(minutes=window["open"])
+        close_time = kill_time + timedelta(minutes=window["close"])
+    else:
+        open_time = kill_time + timedelta(minutes=boss["respawn_minutes"])
+        close_time = open_time + timedelta(minutes=boss["window_minutes"])
     return open_time, close_time
 
 
@@ -874,52 +900,321 @@ def format_event_timer(minutes: int) -> str:
 
 
 def get_event_timer_minutes(boss_key: str):
+    apply_due_event_changes()
     if not event_timer_data.get("active"):
         return None
     bosses = event_timer_data.get("bosses", {})
     return bosses.get(boss_key)
 
 
-def set_boss_timer_from_event(boss_key: str, event_minutes: int):
+def event_window(value):
+    """Stored fixed minutes or inclusive [opening, closing] minute range."""
+    if isinstance(value, (list, tuple)):
+        return int(value[0]), int(value[1])
+    return int(value), int(value)
+
+
+def parse_event_duration(text):
+    parts = re.split(r"\s*[-–—]\s*", text.strip())
+    if len(parts) > 2:
+        raise ValueError("Invalid respawn range")
+    # 8-12h means both endpoints are in hours.
+    if len(parts) == 2 and re.fullmatch(r"\d+", parts[0]) and re.search(r"[a-z]", parts[1], re.I):
+        suffix = re.search(r"[a-z]+", parts[1], re.I).group()
+        parts[0] += suffix
+    values = [parse_event_timer_to_minutes(part) for part in parts]
+    if min(values) <= 0 or (len(values) == 2 and values[0] > values[1]):
+        raise ValueError("Respawn window must be positive and opening must not exceed closing")
+    return values if len(values) == 2 else values[0]
+
+
+def event_duration_text(value):
+    start, end = event_window(value)
+    if start == end:
+        return format_event_timer(start)
+    return f"{format_event_timer(start)}-{format_event_timer(end)}"
+
+
+def set_boss_timer_from_event(boss_key: str, event_minutes):
     remember_timer_state(boss_key)
     reset_proteus_alert_history_if_needed(boss_key)
-    boss = BOSSES[boss_key]
-    open_time = now_utc() + timedelta(minutes=event_minutes)
-    kill_time = open_time - timedelta(minutes=boss["respawn_minutes"])
+    kill_time = now_utc()
+    open_minutes, close_minutes = event_window(event_minutes)
     boss_timers[boss_key] = kill_time.isoformat()
+    timer_windows[boss_key] = {"open": open_minutes, "close": close_minutes}
     pinged_bosses.discard(boss_key)
     save_timers()
     return kill_time
 
 
 def parse_eventstart_pairs(text: str):
-    parts = text.split()
-    if not parts:
-        raise ValueError("Use: /eventstart dhio 20h bt 20h gele 20h")
-
-    if len(parts) % 2 != 0:
-        raise ValueError("Event timers must be boss/timer pairs, like: dhio 20h bt 20h")
-
-    if len(parts) // 2 > 9:
-        raise ValueError("You can set up to 9 bosses in one /eventstart command.")
-
+    """Accept boss/duration pairs with whitespace, comma, semicolon or linebreak separators."""
+    tokens = re.split(r"[\s,;]+", text.strip())
+    tokens = [token for token in tokens if token]
+    if not tokens or len(tokens) % 2:
+        raise ValueError("Enter boss/time pairs, e.g. `gele 12h proto 12h` (or `standard`).")
+    if len(tokens) // 2 > len(BOSSES):
+        raise ValueError("Too many boss/time pairs.")
     parsed = {}
-
-    for i in range(0, len(parts), 2):
-        boss_alias = parts[i]
-        timer_text = parts[i + 1]
-
-        boss_key = find_boss_key(boss_alias)
-        if not boss_key:
-            raise ValueError(f"Boss not found: {boss_alias}")
-
-        minutes = parse_event_timer_to_minutes(timer_text)
-        if minutes <= 0:
-            raise ValueError(f"Invalid timer for {boss_alias}: {timer_text}")
-
-        parsed[boss_key] = minutes
-
+    for i in range(0, len(tokens), 2):
+        alias, duration = tokens[i:i+2]
+        key = find_boss_key(alias)
+        if not key:
+            raise ValueError(f"Unknown boss: {alias}")
+        try:
+            minutes = parse_event_duration(duration)
+        except ValueError:
+            raise ValueError(f"Invalid duration for {alias}: {duration}") from None
+        if key in parsed:
+            raise ValueError(f"Duplicate boss: {alias}")
+        parsed[key] = minutes
     return parsed
+
+
+def parse_event_configuration(text):
+    if text.strip().lower() in {"standard", "normal", "default"}:
+        return {}
+    return parse_eventstart_pairs(text)
+
+
+def format_event_configuration(bosses):
+    if not bosses:
+        return "standard"
+    return " ".join(f"{key if ' ' not in key else 'crom'} {event_duration_text(minutes)}"
+                    for key, minutes in bosses.items())
+
+
+def parse_event_datetime(text):
+    """Interpret human-friendly scheduling in EVENT_TIMEZONE, store UTC."""
+    value = text.strip().lower().replace(",", "")
+    zone = EVENT_TIMEZONE
+    # Standard developer-announcement abbreviations use fixed explicit UTC offsets.
+    explicit_zones = {"utc": 0, "gmt": 0, "cest": 2, "cet": 1,
+                      "bst": 1, "est": -5, "edt": -4, "cst": -6,
+                      "cdt": -5, "mst": -7, "mdt": -6, "pst": -8, "pdt": -7}
+    zone_match = re.search(r"\s+(utc|gmt|cest|cet|bst|est|edt|cst|cdt|mst|mdt|pst|pdt)$", value)
+    if zone_match:
+        zone = timezone(timedelta(hours=explicit_zones[zone_match.group(1)]))
+        value = value[:zone_match.start()].strip()
+    now_local = now_utc().astimezone(zone)
+    match = re.fullmatch(r"(today|tomorrow)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", value)
+    if match:
+        day, hour, minute, meridiem = match.groups()
+        hour, minute = int(hour), int(minute or 0)
+        if minute > 59 or hour > (12 if meridiem else 23) or (meridiem and hour < 1):
+            raise ValueError("Invalid time.")
+        if meridiem:
+            hour = (hour % 12) + (12 if meridiem == "pm" else 0)
+        day_value = now_local.date() + timedelta(days=1 if day == "tomorrow" else 0)
+        result = datetime(day_value.year, day_value.month, day_value.day, hour, minute, tzinfo=zone)
+    else:
+        result = None
+        for fmt in ("%b %d %Y %I%p", "%b %d %I%p", "%b %d %Y %I:%M%p", "%b %d %I:%M%p", "%Y-%m-%d %H:%M", "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M",
+                    "%m/%d %I:%M %p", "%m/%d %H:%M", "%m/%d %H%M", "%m/%d/%Y %H%M"):
+            try:
+                parsed = datetime.strptime(value, fmt)
+                if "%Y" not in fmt:
+                    parsed = parsed.replace(year=now_local.year)
+                    if parsed.replace(tzinfo=zone) <= now_local:
+                        parsed = parsed.replace(year=now_local.year + 1)
+                result = parsed.replace(tzinfo=zone)
+                break
+            except ValueError:
+                continue
+        if result is None:
+            raise ValueError("Invalid date/time. Try `tomorrow 3am` or `10/22 03:00`.")
+    timestamp = result.astimezone(timezone.utc)
+    if timestamp <= now_utc():
+        raise ValueError("Schedule must be in the future. Use Change Now to apply immediately.")
+    return timestamp
+
+
+def save_event_schedule():
+    save_json(EVENT_SCHEDULE_FILE, event_schedule)
+
+
+def apply_due_event_changes():
+    """Apply past-due replacements once; server resets mean old boss kills are invalid."""
+    global event_timer_data, current_event_text
+    due = sorted((e for e in event_schedule if e.get("status") == "pending"
+                  and datetime.fromisoformat(e["when"]) <= now_utc()),
+                 key=lambda e: (e["when"], e["id"]))
+    if not due:
+        return False
+    for item in due:
+        bosses = item["bosses"]
+        event_timer_data = {"active": bool(bosses), "bosses": bosses}
+        current_event_text = item.get("announcement") or None
+        item["status"] = "applied"
+        print(f"Applied scheduled event {item['id']} at {item['when']}")
+    # Reboots may have missed several changes: latest wins, and wipe only once.
+    boss_timers.clear()
+    timer_windows.clear()
+    timer_history.clear()
+    pinged_bosses.clear()
+    reset_proteus_alert_history()
+    save_timers()
+    save_timer_history()
+    save_event_timers()
+    save_event()
+    save_event_schedule()
+    return True
+
+
+def pending_event_changes():
+    return sorted((item for item in event_schedule if item.get("status") == "pending"),
+                  key=lambda item: (item["when"], item["id"]))
+
+
+def event_manager_embed():
+    embed = discord.Embed(title="📅 Dagda Event Scheduler", color=discord.Color.blurple())
+    embed.add_field(name="Current respawn rules", value=format_event_configuration(
+        event_timer_data.get("bosses", {}) if event_timer_data.get("active") else {}), inline=False)
+    upcoming = pending_event_changes()
+    lines = [f"`{i+1}.` <t:{int(datetime.fromisoformat(e['when']).timestamp())}:F> — "
+             f"{format_event_configuration(e['bosses'])}" for i, e in enumerate(upcoming[:12])]
+    embed.add_field(name="Upcoming replacements", value="\n".join(lines) if lines else "None scheduled", inline=False)
+    embed.set_footer(text=f"Timezone: {EVENT_TIMEZONE.key} • New configurations replace previous overrides • Scheduled transitions wipe old boss timers")
+    return embed
+
+
+class EventChangeModal(discord.ui.Modal):
+    def __init__(self, existing=None, immediate=False):
+        self.existing = existing
+        self.immediate = immediate
+        super().__init__(title="Edit active event" if immediate else ("Edit scheduled event" if existing else "Schedule event"))
+        if not immediate:
+            when_value = ""
+            if existing:
+                when_value = datetime.fromisoformat(existing["when"]).astimezone(EVENT_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+            self.when_input = discord.ui.TextInput(label=f"Start time ({EVENT_TIMEZONE.key})", placeholder="tomorrow 3am or 2026-10-22 03:00", default=when_value, max_length=100)
+            self.add_item(self.when_input)
+        current_bosses = existing["bosses"] if existing else (event_timer_data.get("bosses", {}) if immediate and event_timer_data.get("active") else {})
+        self.timer_input = discord.ui.TextInput(label="Bosses and durations (or standard)", style=discord.TextStyle.paragraph,
+                                               default=format_event_configuration(current_bosses), max_length=1500)
+        self.add_item(self.timer_input)
+        current_announcement = (existing.get("announcement", "") if existing else
+                                (current_event_text or "") if immediate else "")
+        self.announcement_input = discord.ui.TextInput(
+            label="Event announcement (optional)", style=discord.TextStyle.paragraph,
+            default=current_announcement, required=False, max_length=1000)
+        self.add_item(self.announcement_input)
+
+    async def on_submit(self, interaction):
+        global event_timer_data, current_event_text
+        if not in_command_channel(interaction) or not user_can_manage_timers(interaction):
+            await interaction.response.send_message("Only timer managers in the command channel can make changes.", ephemeral=True)
+            return
+        try:
+            bosses = parse_event_configuration(self.timer_input.value)
+            when = parse_event_datetime(self.when_input.value) if not self.immediate else None
+        except ValueError as error:
+            await interaction.response.send_message(f"Couldn't save: {error}\nYour existing schedule was not changed.", ephemeral=True)
+            return
+        if not self.immediate:
+            collision = next((e for e in pending_event_changes()
+                              if e["when"] == when.isoformat()
+                              and (not self.existing or e["id"] != self.existing["id"])), None)
+            if collision:
+                await interaction.response.send_message(
+                    "Another change is already scheduled at that exact time. Edit that entry or choose a different time.",
+                    ephemeral=True)
+                return
+        if self.immediate:
+            # Queued replacements remain queued until canceled deliberately.
+            event_timer_data = {"active": bool(bosses), "bosses": bosses}
+            current_event_text = self.announcement_input.value.strip() or None
+            save_event_timers()
+            save_event()
+            summary = "Event rules changed immediately."
+        elif self.existing:
+            match = next((e for e in event_schedule if e['id'] == self.existing['id'] and e['status'] == 'pending'), None)
+            if not match:
+                await interaction.response.send_message("This scheduled change was already applied or canceled.", ephemeral=True)
+                return
+            match.update({"when": when.isoformat(), "bosses": bosses, "announcement": self.announcement_input.value.strip()})
+            save_event_schedule()
+            summary = "Scheduled event updated."
+        else:
+            event_schedule.append({"id": uuid.uuid4().hex[:10], "when": when.isoformat(), "bosses": bosses, "announcement": self.announcement_input.value.strip(), "status": "pending"})
+            save_event_schedule()
+            summary = "Event replacement scheduled."
+        await interaction.response.send_message(f"✅ {summary}\n{format_event_configuration(bosses)}", ephemeral=False)
+        try:
+            await update_display_board()
+        except Exception as e:
+            print(f"Event scheduler board refresh failed: {e}")
+
+
+class EventScheduleChoice(discord.ui.Select):
+    def __init__(self, action):
+        self.action = action
+        events = pending_event_changes()[:25]
+        options = [discord.SelectOption(label=f"{i+1}. {datetime.fromisoformat(e['when']).astimezone(EVENT_TIMEZONE):%m/%d %I:%M %p}",
+                                        description=format_event_configuration(e['bosses'])[:95], value=e['id']) for i, e in enumerate(events)]
+        super().__init__(placeholder="Choose the scheduled change", options=options)
+
+    async def callback(self, interaction):
+        if not in_command_channel(interaction) or not user_can_manage_timers(interaction):
+            await interaction.response.send_message("Only timer managers in the command channel can make changes.", ephemeral=True)
+            return
+        item = next((e for e in pending_event_changes() if e['id'] == self.values[0]), None)
+        if not item:
+            await interaction.response.send_message("That schedule entry no longer exists.", ephemeral=True)
+            return
+        if self.action == "edit":
+            await interaction.response.send_modal(EventChangeModal(existing=item))
+        else:
+            item['status'] = 'canceled'
+            save_event_schedule()
+            await interaction.response.edit_message(content="✅ Scheduled change canceled.", view=None)
+
+
+class EventChoiceView(discord.ui.View):
+    def __init__(self, action):
+        super().__init__(timeout=180)
+        self.add_item(EventScheduleChoice(action))
+
+
+class EventManagerView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Schedule", style=discord.ButtonStyle.primary, custom_id="dagda:event:schedule")
+    async def schedule(self, interaction, button):
+        if not in_command_channel(interaction) or not user_can_manage_timers(interaction):
+            await interaction.response.send_message("Only timer managers in the command channel can make changes.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EventChangeModal())
+
+    @discord.ui.button(label="Edit scheduled", style=discord.ButtonStyle.secondary, custom_id="dagda:event:edit")
+    async def edit(self, interaction, button):
+        if not pending_event_changes():
+            await interaction.response.send_message("No upcoming event changes to edit.", ephemeral=True)
+            return
+        await interaction.response.send_message("Select an event to edit:", view=EventChoiceView("edit"), ephemeral=True)
+
+    @discord.ui.button(label="Edit active", style=discord.ButtonStyle.secondary, custom_id="dagda:event:now")
+    async def now(self, interaction, button):
+        if not in_command_channel(interaction) or not user_can_manage_timers(interaction):
+            await interaction.response.send_message("Only timer managers in the command channel can make changes.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EventChangeModal(immediate=True))
+
+    @discord.ui.button(label="Cancel scheduled", style=discord.ButtonStyle.danger, custom_id="dagda:event:cancel")
+    async def cancel(self, interaction, button):
+        if not pending_event_changes():
+            await interaction.response.send_message("No upcoming changes to cancel.", ephemeral=True)
+            return
+        await interaction.response.send_message("Select a change to cancel:", view=EventChoiceView("cancel"), ephemeral=True)
+
+
+@bot.tree.command(name="event", description="Manage scheduled respawn event changes", guild=discord.Object(id=GUILD_ID))
+async def event_manager(interaction: discord.Interaction):
+    if not in_command_channel(interaction):
+        await interaction.response.send_message("Use the command channel.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=event_manager_embed(), view=EventManagerView())
 
 
 def build_board_embed():
@@ -1153,6 +1448,9 @@ async def check_due_boss_pings():
 @tasks.loop(minutes=1)
 async def auto_refresh_board():
     try:
+        changed = apply_due_event_changes()
+        if changed:
+            await clear_all_alert_messages()
         await update_display_board()
         await check_due_boss_pings()
         print("Board refreshed")
@@ -1167,6 +1465,7 @@ async def before_auto_refresh_board():
 
 async def setup_hook():
     guild = discord.Object(id=GUILD_ID)
+    bot.add_view(EventManagerView())
     await bot.tree.sync(guild=guild)
 
 
@@ -1178,6 +1477,7 @@ async def on_ready():
     load_data()
 
     try:
+        await clear_all_alert_messages() if not boss_timers else None
         await update_display_board()
         await check_due_boss_pings()
         print("Initial board update complete")
@@ -1286,6 +1586,8 @@ async def on_message(message: discord.Message):
         
                 if base_minutes is None:
                     base_minutes = BOSSES[boss_key]["respawn_minutes"]
+                else:
+                    base_minutes = event_window(base_minutes)[0]
         
                 if time_text.startswith("-"):
                     final_minutes = max(0, base_minutes - adjustment)
@@ -1321,7 +1623,7 @@ async def on_message(message: discord.Message):
             set_boss_timer_from_event(boss_key, event_minutes)
 
             await message.channel.send(
-                f"{BOSSES[boss_key]['display']} set | Event {format_event_timer(event_minutes)}"
+                f"{BOSSES[boss_key]['display']} set | Event {event_duration_text(event_minutes)}"
             )
 
         else:
@@ -1413,6 +1715,7 @@ class ConfirmWipeView(discord.ui.View):
             remember_timer_state(boss_key)
 
         boss_timers = {}
+        timer_windows.clear()
         pinged_bosses = set()
         reset_proteus_alert_history()
         save_timers()
@@ -1484,6 +1787,7 @@ async def clear_section(interaction: discord.Interaction, section: str):
         if boss_key in boss_timers:
             remember_timer_state(boss_key)
             del boss_timers[boss_key]
+            timer_windows.pop(boss_key, None)
             cleared_any = True
 
         pinged_bosses.discard(boss_key)
@@ -1565,6 +1869,7 @@ async def purge_expired(interaction: discord.Interaction):
         if current > close_time:
             remember_timer_state(boss_key)
             boss_timers.pop(boss_key, None)
+            timer_windows.pop(boss_key, None)
             pinged_bosses.discard(boss_key)
             expired_bosses.append(BOSSES[boss_key]["display"])
             await delete_alert_message_for_boss(boss_key)
@@ -1629,6 +1934,7 @@ async def reset_boss(interaction: discord.Interaction, boss: str):
 
     remember_timer_state(boss_key)
     del boss_timers[boss_key]
+    timer_windows.pop(boss_key, None)
     pinged_bosses.discard(boss_key)
     save_timers()
     await delete_alert_message_for_boss(boss_key)
@@ -1719,7 +2025,7 @@ async def set_timer(interaction: discord.Interaction, boss: str, open: str = Non
             print(f"Board update after event set failed: {e}")
 
         await interaction.response.send_message(
-            f"{BOSSES[boss_key]['display']} set | Event {format_event_timer(event_minutes)}",
+            f"{BOSSES[boss_key]['display']} set | Event {event_duration_text(event_minutes)}",
             ephemeral=False,
         )
         return
@@ -2018,7 +2324,7 @@ async def event_start(interaction: discord.Interaction, timers: str):
     save_event_timers()
 
     boss_list = ", ".join(
-        f"{BOSSES[boss_key]['display']} ({format_event_timer(minutes)})"
+        f"{BOSSES[boss_key]['display']} ({event_duration_text(minutes)})"
         for boss_key, minutes in parsed.items()
     )
 
